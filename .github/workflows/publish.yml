@@ -1,0 +1,99 @@
+name: publish
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - labeled
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Release: pushing to main publishes the package.json version under `latest`.
+  # Skipped if that version is already on npm (bump version to cut a release).
+  release:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC: npm trusted publishing
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm ci
+      - name: Resolve release
+        id: meta
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "publish=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VERSION already published. Bump the version to release."
+          else
+            echo "publish=yes" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish @latest (OIDC, with provenance)
+        if: steps.meta.outputs.publish == 'yes'
+        run: npm publish --tag latest --access public
+
+  # Pre-release: add the `publish-dev` label to a PR to publish a unique
+  # prerelease version under a throwaway PR-scoped dist-tag. The label is
+  # always removed after, so re-adding it triggers another publish.
+  dev:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.label.name == 'publish-dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm ci
+      - name: Resolve prerelease version
+        id: meta
+        run: |
+          BASE=$(node -p "require('./package.json').version")
+          SHA=$(git rev-parse --short HEAD)
+          PR=${{ github.event.pull_request.number }}
+          echo "version=$BASE-pr$PR.g$SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=pr-$PR" >> "$GITHUB_OUTPUT"
+      - name: Publish prerelease (OIDC, with provenance)
+        run: |
+          npm version --no-git-tag-version --allow-same-version "${{ steps.meta.outputs.version }}"
+          npm publish --tag "${{ steps.meta.outputs.tag }}" --access public
+      - name: Comment published version on PR
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ steps.meta.outputs.version }}"
+          gh pr comment "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --body "Published prerelease \`@cestoliv/grove@$V\`
+
+          \`\`\`bash
+          npm install -g @cestoliv/grove@$V
+          \`\`\`
+
+          Exact version pinned. This is **not** a stable channel."
+      - name: Remove publish-dev label
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr edit "${{ github.event.pull_request.number }}" --remove-label publish-dev --repo "${{ github.repository }}"
