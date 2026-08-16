@@ -5,6 +5,10 @@ export interface ExecOptions {
   env?: Record<string, string>;
   stdin?: string;
   timeoutMs?: number;
+  // Called with each chunk as it arrives. exec still resolves with the full
+  // buffered output, so a caller can use one, the other, or both.
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
 }
 
 export interface ExecResult {

@@ -103,3 +103,31 @@ describe('FakeTransport', () => {
     expect(new FakeTransport('atlas').name).toBe('atlas');
   });
 });
+
+describe('FakeTransport streaming', () => {
+  it('replays scripted output through the callbacks', async () => {
+    const transport = new FakeTransport('mac').on('docker logs', {
+      stdout: 'line one\n',
+      stderr: 'warn\n',
+    });
+    const out: string[] = [];
+    const err: string[] = [];
+
+    await transport.exec('docker', ['logs', 'grove-ios-1'], {
+      onStdout: (chunk) => out.push(chunk),
+      onStderr: (chunk) => err.push(chunk),
+    });
+
+    expect(out).toEqual(['line one\n']);
+    expect(err).toEqual(['warn\n']);
+  });
+
+  it('calls nothing when the scripted output is empty', async () => {
+    const transport = new FakeTransport('mac').on('docker stop', { code: 0 });
+    const out: string[] = [];
+    await transport.exec('docker', ['stop', 'grove-ios-1'], {
+      onStdout: (chunk) => out.push(chunk),
+    });
+    expect(out).toEqual([]);
+  });
+});

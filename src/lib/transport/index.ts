@@ -11,7 +11,6 @@ export {
   normalizeArch,
   PROBE_TIMEOUT_MS,
   probeHost,
-  probeHosts,
 } from './probe.js';
 export { runProcess, TIMEOUT_EXIT_CODE } from './process.js';
 export {

@@ -36,6 +36,8 @@ function buildReport(overrides: Partial<PlanReport> = {}): PlanReport {
       },
     ],
     warnings: [],
+    actions: [],
+    degraded: [],
     unreachable: ['atlas'],
     ok: false,
     ...overrides,
@@ -116,13 +118,108 @@ describe('renderPlanReport', () => {
     expect(text.trimEnd().endsWith('Unreachable hosts: atlas')).toBe(true);
   });
 
-  it('closes with a success line when every host answers', () => {
+  it('closes with a success line when every host answers and nothing changes', () => {
     const report = buildReport({ unreachable: [], ok: true });
     report.hosts[1].reachable = true;
     report.hosts[1].reason = undefined;
     report.hosts[1].arch = 'amd64';
     const text = renderPlanReport(report, { color: false });
-    expect(text.trimEnd().endsWith('grove plan changes nothing.')).toBe(true);
+    expect(
+      text.trimEnd().endsWith('Every host answered. Nothing to change.'),
+    ).toBe(true);
+  });
+
+  it('closes with the change count, counting no report action', () => {
+    const report = buildReport({
+      unreachable: [],
+      ok: true,
+      actions: [
+        {
+          kind: 'create-runner',
+          host: 'mac',
+          forge: 'gh-overload',
+          group: 'overload-arm',
+          index: 1,
+          name: 'grove-overload-arm-1',
+          destructive: false,
+        },
+        {
+          kind: 'report-unsupported',
+          group: 'chevro-dind',
+          reason: 'grove manages GitHub groups on the Docker stack today',
+          destructive: false,
+        },
+      ],
+    });
+    report.hosts[1].reachable = true;
+    report.hosts[1].reason = undefined;
+    report.hosts[1].arch = 'amd64';
+    const text = renderPlanReport(report, { color: false });
+    expect(
+      text
+        .trimEnd()
+        .endsWith(
+          '1 change(s) planned. grove plan changes nothing. Run grove apply to make them.',
+        ),
+    ).toBe(true);
+  });
+
+  it('closes for apply, which is about to make the changes', () => {
+    const report = buildReport({
+      unreachable: [],
+      ok: true,
+      actions: [
+        {
+          kind: 'create-runner',
+          host: 'mac',
+          forge: 'gh-overload',
+          group: 'overload-arm',
+          index: 1,
+          name: 'grove-overload-arm-1',
+          destructive: false,
+        },
+        {
+          kind: 'report-unsupported',
+          group: 'chevro-dind',
+          reason: 'grove manages GitHub groups on the Docker stack today',
+          destructive: false,
+        },
+      ],
+    });
+    report.hosts[1].reachable = true;
+    report.hosts[1].reason = undefined;
+    report.hosts[1].arch = 'amd64';
+    const text = renderPlanReport(report, { color: false, closing: 'apply' });
+    expect(text.trimEnd().endsWith('1 change(s) to apply.')).toBe(true);
+    expect(text).not.toContain('grove plan changes nothing');
+  });
+
+  it('closes for apply with nothing to change when no action is left', () => {
+    const report = buildReport({ unreachable: [], ok: true });
+    report.hosts[1].reachable = true;
+    report.hosts[1].reason = undefined;
+    report.hosts[1].arch = 'amd64';
+    const text = renderPlanReport(report, { color: false, closing: 'apply' });
+    expect(text.trimEnd().endsWith('Nothing to change.')).toBe(true);
+    expect(text).not.toContain('Every host answered');
+  });
+
+  it('keeps the unreachable ending when a host is down and changes are planned', () => {
+    const report = buildReport({
+      actions: [
+        {
+          kind: 'create-runner',
+          host: 'mac',
+          forge: 'gh-overload',
+          group: 'overload-arm',
+          index: 1,
+          name: 'grove-overload-arm-1',
+          destructive: false,
+        },
+      ],
+    });
+    const text = renderPlanReport(report, { color: false });
+    expect(text.trimEnd().endsWith('Unreachable hosts: atlas')).toBe(true);
   });
 
   it('omits the warnings section when there are none', () => {
@@ -156,5 +253,46 @@ describe('renderPlanReport', () => {
 
   it('emits ANSI escapes when colour is on', () => {
     expect(renderPlanReport(buildReport(), { color: true })).toContain(ESCAPE);
+  });
+
+  it('says nothing needs changing when there are no actions', () => {
+    const text = renderPlanReport(buildReport(), { color: false });
+    expect(text).toContain('Changes');
+    expect(text).toContain('nothing to change');
+  });
+
+  it('prints one line per action', () => {
+    const report = buildReport({
+      actions: [
+        {
+          kind: 'create-runner',
+          host: 'mac',
+          forge: 'gh-overload',
+          group: 'overload-arm',
+          index: 1,
+          name: 'grove-overload-arm-1',
+          destructive: false,
+        },
+      ],
+    });
+    const text = renderPlanReport(report, { color: false });
+    expect(text).toContain(
+      'create      grove-overload-arm-1  on mac, registering at gh-overload',
+    );
+    expect(text).not.toContain('nothing to change');
+  });
+
+  it('closes with the degraded targets when no host is down', () => {
+    const report = buildReport({
+      unreachable: [],
+      degraded: ['grove-overload-arm-1'],
+      ok: false,
+    });
+    report.hosts[1].reachable = true;
+    report.hosts[1].reason = undefined;
+    const text = renderPlanReport(report, { color: false });
+    expect(text.trimEnd().endsWith('Degraded: grove-overload-arm-1')).toBe(
+      true,
+    );
   });
 });

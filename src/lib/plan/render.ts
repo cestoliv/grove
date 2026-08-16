@@ -1,4 +1,5 @@
 import pc from 'picocolors';
+import { describeAction, isReport } from '../reconcile/actions.js';
 import type { PlanReport } from './report.js';
 
 const STATE_OK = 'ok';
@@ -7,6 +8,8 @@ const STATE_COLUMN = 3;
 
 export interface RenderOptions {
   color?: boolean;
+  // `plan` points at `grove apply`, `apply` is already making the changes.
+  closing?: 'plan' | 'apply';
 }
 
 export interface TableOptions {
@@ -83,6 +86,15 @@ export function renderPlanReport(
     lines.push(`  ${line}`);
   }
 
+  lines.push('', 'Changes');
+  if (report.actions.length === 0) {
+    lines.push('  nothing to change');
+  } else {
+    for (const action of report.actions) {
+      lines.push(`  ${describeAction(action)}`);
+    }
+  }
+
   if (report.warnings.length > 0) {
     lines.push('', 'Warnings');
     for (const warning of report.warnings) {
@@ -92,12 +104,32 @@ export function renderPlanReport(
     }
   }
 
+  // Report actions describe what grove found, not what it would do, so only
+  // the rest count as changes.
+  const changes = report.actions.filter((action) => !isReport(action)).length;
+
   lines.push('');
-  lines.push(
-    report.ok
-      ? c.green('Every host answered. grove plan changes nothing.')
-      : c.red(`Unreachable hosts: ${report.unreachable.join(', ')}`),
-  );
+  if (!report.ok) {
+    lines.push(
+      report.unreachable.length > 0
+        ? c.red(`Unreachable hosts: ${report.unreachable.join(', ')}`)
+        : c.red(`Degraded: ${report.degraded.join(', ')}`),
+    );
+  } else if ((options.closing ?? 'plan') === 'apply') {
+    lines.push(
+      changes > 0
+        ? c.yellow(`${changes} change(s) to apply.`)
+        : c.green('Nothing to change.'),
+    );
+  } else if (changes > 0) {
+    lines.push(
+      c.yellow(
+        `${changes} change(s) planned. grove plan changes nothing. Run grove apply to make them.`,
+      ),
+    );
+  } else {
+    lines.push(c.green('Every host answered. Nothing to change.'));
+  }
 
   return lines.join('\n');
 }

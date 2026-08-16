@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FakeTransport } from './fake.js';
-import {
-  normalizeArch,
-  PROBE_TIMEOUT_MS,
-  probeHost,
-  probeHosts,
-} from './probe.js';
+import { normalizeArch, PROBE_TIMEOUT_MS, probeHost } from './probe.js';
 
 describe('normalizeArch', () => {
   it('folds the aarch64 and arm64 spellings together', () => {
@@ -111,34 +106,5 @@ describe('probeHost', () => {
       platform: undefined,
       arch: undefined,
     });
-  });
-});
-
-describe('probeHosts', () => {
-  it('probes every host and keeps the map order', async () => {
-    const transports = new Map([
-      [
-        'mac',
-        new FakeTransport('mac').on('uname', { stdout: 'Darwin arm64\n' }),
-      ],
-      [
-        'atlas',
-        new FakeTransport('atlas').fail('uname', 'No route to host', 255),
-      ],
-    ]);
-    const probes = await probeHosts(transports);
-    expect(probes.map((probe) => probe.host)).toEqual(['mac', 'atlas']);
-    expect(probes[0].reachable).toBe(true);
-    expect(probes[1].reachable).toBe(false);
-  });
-
-  it('never closes the transports it was handed', async () => {
-    const mac = new FakeTransport('mac');
-    await probeHosts(new Map([['mac', mac]]));
-    expect(mac.closed).toBe(false);
-  });
-
-  it('returns an empty list for an empty map', async () => {
-    expect(await probeHosts(new Map())).toEqual([]);
   });
 });

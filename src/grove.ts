@@ -1,4 +1,7 @@
+import { installWarningFilter } from './lib/node-warnings.js';
 import { buildProgram } from './program.js';
+
+installWarningFilter();
 
 try {
   await buildProgram().parseAsync(process.argv);

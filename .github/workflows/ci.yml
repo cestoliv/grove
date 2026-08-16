@@ -20,3 +20,14 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # The bundler can break the built binary while every other gate stays
+      # green, so CI runs it once.
+      - name: smoke the built binary
+        run: |
+          node dist/grove.js --version
+          node dist/grove.js config --path
+          # A missing config must exit 2. `|| code=$?` keeps the shell's `set -e`
+          # from ending the step on the failure this line expects.
+          code=0
+          node dist/grove.js plan --config /nonexistent.yaml || code=$?
+          test "$code" -eq 2

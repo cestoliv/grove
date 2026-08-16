@@ -2,6 +2,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { FakeForgeClient } from '../lib/forge/index.js';
+import { StateStore } from '../lib/state/index.js';
 import { FakeTransport } from '../lib/transport/index.js';
 import {
   EXIT_INVALID_CONFIG,
@@ -11,12 +13,15 @@ import {
 } from './plan.js';
 
 let dir: string;
+let store: StateStore;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'grove-plan-'));
+  store = StateStore.open(':memory:');
 });
 
 afterEach(async () => {
+  store.close();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -67,6 +72,9 @@ describe('runPlan', () => {
     const code = await runPlan({
       config: path,
       env: {},
+      store,
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
       connect: reachableFleet().connect,
       color: false,
       stdout: (text) => out.push(text),
@@ -78,7 +86,9 @@ describe('runPlan', () => {
     expect(text).toContain('Hosts');
     expect(text).toContain('overload-arm');
     expect(text).toContain('chevro-dind');
-    expect(text).toContain('Every host answered');
+    expect(text).toContain(
+      '2 change(s) planned. grove plan changes nothing. Run grove apply to make them.',
+    );
   });
 
   it('prints the privileged socket warning', async () => {
@@ -87,6 +97,9 @@ describe('runPlan', () => {
     await runPlan({
       config: path,
       env: {},
+      store,
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
       connect: reachableFleet().connect,
       color: false,
       stdout: (text) => out.push(text),
@@ -111,6 +124,9 @@ describe('runPlan', () => {
     const code = await runPlan({
       config: path,
       env: {},
+      store,
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
       connect: (name) => transports[name],
       color: false,
       stdout: (text) => out.push(text),
@@ -130,6 +146,9 @@ describe('runPlan', () => {
     const code = await runPlan({
       config: path,
       env: {},
+      store,
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
       connect: reachableFleet().connect,
       color: false,
       stdout: (text) => out.push(text),
@@ -147,6 +166,9 @@ describe('runPlan', () => {
     const code = await runPlan({
       config: join(dir, 'nowhere.yaml'),
       env: {},
+      store,
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
       color: false,
       stdout: () => undefined,
       stderr: (text) => err.push(text),
@@ -163,6 +185,9 @@ describe('runPlan', () => {
     await runPlan({
       config: path,
       env: {},
+      store,
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
       connect: fleet.connect,
       color: false,
       stdout: () => undefined,
@@ -177,6 +202,9 @@ describe('runPlan', () => {
     const out: string[] = [];
     const code = await runPlan({
       env: { GROVE_CONFIG: path },
+      store,
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
       connect: reachableFleet().connect,
       color: false,
       stdout: (text) => out.push(text),
@@ -184,5 +212,37 @@ describe('runPlan', () => {
     });
     expect(code).toBe(EXIT_OK);
     expect(out.join('\n')).toContain(path);
+  });
+
+  it('prints the runners it would create', async () => {
+    const path = await write(CONFIG);
+    const out: string[] = [];
+    const transports: Record<string, FakeTransport> = {
+      mac: new FakeTransport('mac')
+        .on('uname', { stdout: 'Darwin arm64\n' })
+        .on('sh -c printf', { stdout: '/Users/olivier' })
+        .on('docker ps', { stdout: '' }),
+      atlas: new FakeTransport('atlas')
+        .on('uname', { stdout: 'Linux x86_64\n' })
+        .on('sh -c printf', { stdout: '/home/ci' })
+        .on('docker ps', { stdout: '' }),
+    };
+    const code = await runPlan({
+      config: path,
+      env: {},
+      store,
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
+      connect: (name) => transports[name],
+      color: false,
+      stdout: (text) => out.push(text),
+      stderr: () => undefined,
+    });
+
+    expect(code).toBe(EXIT_OK);
+    const text = out.join('\n');
+    expect(text).toContain('Changes');
+    expect(text).toContain('create      grove-overload-arm-1');
+    expect(text).toContain('skipped     chevro-dind');
   });
 });

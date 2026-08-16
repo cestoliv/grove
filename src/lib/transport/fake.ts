@@ -67,13 +67,17 @@ export class FakeTransport implements Transport {
     const entry = this.script.find((candidate) =>
       line.startsWith(candidate.prefix),
     );
-    if (entry === undefined) {
-      return this.fallbackResult;
-    }
-    if (entry.error !== undefined) {
+    if (entry?.error !== undefined) {
       throw new Error(entry.error);
     }
-    return entry.result ?? this.fallbackResult;
+    const result = entry?.result ?? this.fallbackResult;
+    if (result.stdout !== '') {
+      options?.onStdout?.(result.stdout);
+    }
+    if (result.stderr !== '') {
+      options?.onStderr?.(result.stderr);
+    }
+    return result;
   }
 
   async readFile(path: string): Promise<string> {

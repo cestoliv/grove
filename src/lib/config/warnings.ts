@@ -1,6 +1,9 @@
 import type { GroveConfig } from './schema.js';
 
-export type WarningCode = 'privileged-docker-socket' | 'arch-mismatch';
+export type WarningCode =
+  | 'privileged-docker-socket'
+  | 'arch-mismatch'
+  | 'raw-unused';
 
 export interface ConfigWarning {
   code: WarningCode;

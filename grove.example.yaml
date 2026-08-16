@@ -2,8 +2,8 @@
 # Copy this to grove.yaml and edit it. grove reads ./grove.yaml by default,
 # or the path in --config or GROVE_CONFIG.
 
-# How often the daemon checks the fleet. Milestone 1 parses these and does
-# not yet act on them.
+# How often the daemon checks the fleet. The daemon arrives in milestone 5,
+# and these values are parsed and reported until then.
 tick: { fast: 2m, full: 30m }
 
 # Hosts that run runners. The control node itself is type: local. Every other
@@ -63,3 +63,16 @@ groups:
     work_root: ~/ci/ios          # this group overrides the host default
     max_job_duration: 90m
     max_work_size: 120G
+
+  - name: api-repo
+    forge: gh-overload
+    scope: { level: repository, target: Overload-coach/api }
+    placement: { host: mac, count: 1 }
+    stack: docker
+    labels: [linux, docker]
+    drain_timeout: 5m           # how long a runner may finish its job
+    pull_policy: missing
+    raw:
+      docker_run_args: ["--dns", "1.1.1.1"]
+      env:
+        HTTPS_PROXY: http://proxy.internal:3128

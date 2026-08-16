@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GroveConfig, LoadedConfig } from '../config/index.js';
-import { FakeTransport } from '../transport/index.js';
+import type { Action, ObservedState } from '../reconcile/index.js';
 import { buildPlanReport, formatScope } from './report.js';
 
 function buildLoaded(): LoadedConfig {
@@ -36,13 +36,28 @@ function buildLoaded(): LoadedConfig {
   return { path: '/work/grove.yaml', config, warnings: [] };
 }
 
-function fakeConnect(transports: Record<string, FakeTransport>) {
-  return (name: string) => {
-    const transport = transports[name];
-    if (transport === undefined) {
-      throw new Error(`test has no transport for ${name}`);
-    }
-    return transport;
+function observedState(overrides: Partial<ObservedState> = {}): ObservedState {
+  return {
+    hosts: [
+      {
+        host: 'mac',
+        reachable: true,
+        platform: 'Darwin',
+        arch: 'arm64',
+        containers: [],
+        workRoots: {},
+      },
+      {
+        host: 'atlas',
+        reachable: true,
+        platform: 'Linux',
+        arch: 'amd64',
+        containers: [],
+        workRoots: {},
+      },
+    ],
+    forges: [],
+    ...overrides,
   };
 }
 
@@ -59,15 +74,9 @@ describe('formatScope', () => {
 });
 
 describe('buildPlanReport', () => {
-  it('reports every host as reachable when every probe succeeds', async () => {
-    const transports = {
-      mac: new FakeTransport('mac').on('uname', { stdout: 'Darwin arm64\n' }),
-      atlas: new FakeTransport('atlas').on('uname', {
-        stdout: 'Linux x86_64\n',
-      }),
-    };
-    const report = await buildPlanReport(buildLoaded(), {
-      connect: fakeConnect(transports),
+  it('reports every host as reachable when every host answered', () => {
+    const report = buildPlanReport(buildLoaded(), {
+      observed: observedState(),
     });
 
     expect(report.configPath).toBe('/work/grove.yaml');
@@ -93,18 +102,16 @@ describe('buildPlanReport', () => {
     ]);
   });
 
-  it('marks an unreachable host and names the reason', async () => {
-    const transports = {
-      mac: new FakeTransport('mac').on('uname', { stdout: 'Darwin arm64\n' }),
-      atlas: new FakeTransport('atlas').fail(
-        'uname',
-        'ssh: connect to host atlas port 22: No route to host',
-        255,
-      ),
+  it('marks an unreachable host and names the reason', () => {
+    const observed = observedState();
+    observed.hosts[1] = {
+      host: 'atlas',
+      reachable: false,
+      reason: 'ssh: connect to host atlas port 22: No route to host',
+      containers: [],
+      workRoots: {},
     };
-    const report = await buildPlanReport(buildLoaded(), {
-      connect: fakeConnect(transports),
-    });
+    const report = buildPlanReport(buildLoaded(), { observed });
 
     expect(report.ok).toBe(false);
     expect(report.unreachable).toEqual(['atlas']);
@@ -115,15 +122,9 @@ describe('buildPlanReport', () => {
     expect(report.hosts[1].arch).toBeUndefined();
   });
 
-  it('describes every group grove would manage', async () => {
-    const transports = {
-      mac: new FakeTransport('mac').on('uname', { stdout: 'Darwin arm64\n' }),
-      atlas: new FakeTransport('atlas').on('uname', {
-        stdout: 'Linux x86_64\n',
-      }),
-    };
-    const report = await buildPlanReport(buildLoaded(), {
-      connect: fakeConnect(transports),
+  it('describes every group grove would manage', () => {
+    const report = buildPlanReport(buildLoaded(), {
+      observed: observedState(),
     });
 
     expect(report.groups).toEqual([
@@ -150,18 +151,10 @@ describe('buildPlanReport', () => {
     ]);
   });
 
-  it('sums a map placement that spans hosts', async () => {
+  it('sums a map placement that spans hosts', () => {
     const loaded = buildLoaded();
     loaded.config.groups[0].placement = { mac: 2, atlas: 1 };
-    const transports = {
-      mac: new FakeTransport('mac').on('uname', { stdout: 'Darwin arm64\n' }),
-      atlas: new FakeTransport('atlas').on('uname', {
-        stdout: 'Linux aarch64\n',
-      }),
-    };
-    const report = await buildPlanReport(loaded, {
-      connect: fakeConnect(transports),
-    });
+    const report = buildPlanReport(loaded, { observed: observedState() });
     expect(report.groups[0].placement).toEqual([
       { host: 'mac', count: 2 },
       { host: 'atlas', count: 1 },
@@ -169,7 +162,7 @@ describe('buildPlanReport', () => {
     expect(report.groups[0].total).toBe(3);
   });
 
-  it('carries the config warnings through and adds the arch mismatch warning', async () => {
+  it('carries config warnings, arch warnings and extra warnings', () => {
     const loaded = buildLoaded();
     loaded.warnings = [
       {
@@ -178,57 +171,55 @@ describe('buildPlanReport', () => {
         message: 'group "chevro-dind" runs privileged',
       },
     ];
-    const transports = {
-      mac: new FakeTransport('mac').on('uname', { stdout: 'Darwin arm64\n' }),
-      atlas: new FakeTransport('atlas').on('uname', {
-        stdout: 'Linux aarch64\n',
-      }),
-    };
-    const report = await buildPlanReport(loaded, {
-      connect: fakeConnect(transports),
+    const observed = observedState();
+    observed.hosts[1].arch = 'arm64';
+    const report = buildPlanReport(loaded, {
+      observed,
+      extraWarnings: [
+        { code: 'raw-unused', path: 'groups[0].raw.x', message: 'unused' },
+      ],
     });
 
     expect(report.warnings.map((warning) => warning.code)).toEqual([
       'privileged-docker-socket',
       'arch-mismatch',
+      'raw-unused',
     ]);
     expect(report.warnings[1].message).toContain(
       'asks for amd64 on host "atlas", which reports arm64',
     );
   });
 
-  it('raises no arch warning for a host it could not probe', async () => {
-    const transports = {
-      mac: new FakeTransport('mac').on('uname', { stdout: 'Darwin arm64\n' }),
-      atlas: new FakeTransport('atlas').fail('uname', 'No route to host', 255),
+  it('raises no arch warning for a host it could not observe', () => {
+    const loaded = buildLoaded();
+    const observed = observedState();
+    observed.hosts[1] = {
+      host: 'atlas',
+      reachable: false,
+      reason: 'down',
+      containers: [],
+      workRoots: {},
     };
-    const report = await buildPlanReport(buildLoaded(), {
-      connect: fakeConnect(transports),
-    });
+    const report = buildPlanReport(loaded, { observed });
     expect(report.warnings).toEqual([]);
   });
 
-  it('closes every transport it opened', async () => {
-    const transports = {
-      mac: new FakeTransport('mac').on('uname', { stdout: 'Darwin arm64\n' }),
-      atlas: new FakeTransport('atlas').fail('uname', 'No route to host', 255),
-    };
-    await buildPlanReport(buildLoaded(), { connect: fakeConnect(transports) });
-    expect(transports.mac.closed).toBe(true);
-    expect(transports.atlas.closed).toBe(true);
-  });
-
-  it('passes the probe timeout through', async () => {
-    const transports = {
-      mac: new FakeTransport('mac').on('uname', { stdout: 'Darwin arm64\n' }),
-      atlas: new FakeTransport('atlas').on('uname', {
-        stdout: 'Linux x86_64\n',
-      }),
-    };
-    await buildPlanReport(buildLoaded(), {
-      connect: fakeConnect(transports),
-      probeTimeoutMs: 3000,
+  it('carries the actions and treats a degraded report as not ok', () => {
+    const actions: Action[] = [
+      {
+        kind: 'report-degraded',
+        target: 'grove-overload-arm-1',
+        reason: 'the work root is not usable',
+        host: 'mac',
+        destructive: false,
+      },
+    ];
+    const report = buildPlanReport(buildLoaded(), {
+      observed: observedState(),
+      actions,
     });
-    expect(transports.mac.calls[0].options?.timeoutMs).toBe(3000);
+    expect(report.actions).toEqual(actions);
+    expect(report.degraded).toEqual(['grove-overload-arm-1']);
+    expect(report.ok).toBe(false);
   });
 });
