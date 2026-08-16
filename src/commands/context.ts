@@ -7,6 +7,7 @@ import { loadConfig } from '../lib/config/index.js';
 import {
   type ForgeClient,
   GithubClient,
+  GitlabClient,
   resolveForgeToken,
 } from '../lib/forge/index.js';
 import {
@@ -14,7 +15,7 @@ import {
   FORGE_CONCURRENCY,
   type Limiter,
 } from '../lib/reconcile/index.js';
-import { DockerStack, rawDockerWarnings } from '../lib/stack/index.js';
+import { DockerStack, rawStackWarnings } from '../lib/stack/index.js';
 import { resolveStateDbPath, StateStore } from '../lib/state/index.js';
 import {
   type ConnectFn,
@@ -73,7 +74,7 @@ export async function openFleet(
 
   // Read `raw:` before anything opens, so a malformed block throws like a
   // load error instead of leaking a transport or a database handle.
-  const rawWarnings = rawDockerWarnings(loaded.config);
+  const rawWarnings = rawStackWarnings(loaded.config);
 
   const connectFn = options.connect ?? defaultConnect;
   const transports = new Map<string, Transport>();
@@ -112,18 +113,23 @@ export async function openFleet(
   const createForgeClient =
     options.createForgeClient ??
     ((name, forge, token) =>
-      new GithubClient({
-        name,
-        token,
-        ...(forge.url === undefined ? {} : { url: forge.url }),
-      }));
+      forge.kind === 'gitlab'
+        ? new GitlabClient({ name, token, url: forge.url })
+        : new GithubClient({
+            name,
+            token,
+            ...(forge.url === undefined ? {} : { url: forge.url }),
+          }));
 
+  // Every Docker group's forge, whatever its kind. A group naming a forge
+  // that does not exist is a config error the loader already reported, and
+  // the guard keeps this from reading undefined if one ever gets through.
   const wanted = new Set(
     loaded.config.groups
       .filter(
         (group) =>
           group.stack === 'docker' &&
-          loaded.config.forges[group.forge]?.kind === 'github',
+          loaded.config.forges[group.forge] !== undefined,
       )
       .map((group) => group.forge),
   );

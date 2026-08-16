@@ -44,15 +44,17 @@ groups:
 
   - name: chevro-dind
     forge: gl-chevro
-    scope: { level: instance }
-    placement: { atlas: 3 }
+    scope: { level: instance }   # needs an admin personal token
+    placement: { atlas: 3 }      # one entity, three managers
     stack: docker
     arch: amd64
     tags: [docker, dind]         # GitLab speaks tags
     image: gitlab/gitlab-runner:latest
-    privileged: true
+    privileged: true             # applies to the job containers
     volumes: ["/cache", "/var/run/docker.sock:/var/run/docker.sock"]
     concurrent: 4
+    raw:
+      job_image: docker:27       # the image a job gets when it names none
 
   - name: ios
     forge: gh-overload

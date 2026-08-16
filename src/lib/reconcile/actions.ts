@@ -9,7 +9,14 @@ export interface CreateRunnerAction {
   name: string;
   // Set when a record already exists and only the container is missing.
   recordId?: number;
-  destructive: false;
+  // The forge runner id the planner judged gone. Set when the group holds a
+  // stored registration whose entity the forge no longer lists, so grove
+  // mints a new one instead of registering against an id that is gone.
+  // Carrying the id lets apply retire that row and no other.
+  renewRegistration?: string;
+  // A renewal discards the only copy of a token GitLab never shows again, so
+  // that create is destructive and the rest are not.
+  destructive: boolean;
 }
 
 export interface StartContainerAction {
@@ -47,6 +54,23 @@ export interface DeregisterRunnerAction {
   name: string;
   forgeRunnerId: string;
   recordId?: number;
+  destructive: true;
+}
+
+// GitLab gives a whole group one runner entity, so deleting it takes every
+// manager with it. It goes only when the last container has gone, which is
+// why this is a separate action and not a deregister with a flag.
+export interface DeleteSharedRunnerAction {
+  kind: 'delete-shared-runner';
+  host?: string;
+  forge: string;
+  scope: Scope;
+  group: string;
+  // The entity description, which is the name grove gave it.
+  name: string;
+  forgeRunnerId: string;
+  // The grove.db row that holds the shared token, retired with the entity.
+  registrationId?: number;
   destructive: true;
 }
 
@@ -96,6 +120,7 @@ export type Action =
   | StopContainerAction
   | RemoveContainerAction
   | DeregisterRunnerAction
+  | DeleteSharedRunnerAction
   | RetireRecordAction
   | ReportUnmanagedAction
   | ReportOrphanRecordAction
@@ -108,6 +133,7 @@ export const ACTION_VERBS: Record<Action['kind'], string> = {
   'stop-container': 'drain',
   'remove-container': 'remove',
   'deregister-runner': 'deregister',
+  'delete-shared-runner': 'delete',
   'retire-record': 'retire',
   'report-unmanaged': 'unmanaged',
   'report-orphan-record': 'orphan',
@@ -127,7 +153,10 @@ export function describeAction(action: Action): string {
       return line(
         action.kind,
         action.name,
-        `on ${action.host}, registering at ${action.forge}`,
+        `on ${action.host}, registering at ${action.forge}` +
+          (action.renewRegistration === undefined
+            ? ''
+            : ', renewing the group registration'),
       );
     case 'start-container':
       return line(action.kind, action.name, `on ${action.host}`);
@@ -144,6 +173,12 @@ export function describeAction(action: Action): string {
         action.kind,
         action.name,
         `at ${action.forge}, runner id ${action.forgeRunnerId}`,
+      );
+    case 'delete-shared-runner':
+      return line(
+        action.kind,
+        action.name,
+        `runner entity ${action.forgeRunnerId} at ${action.forge}, its last manager is gone`,
       );
     case 'retire-record':
       return line(action.kind, action.name, 'in the grove database');

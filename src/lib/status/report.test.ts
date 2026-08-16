@@ -32,6 +32,7 @@ function record(name: string, id = 1): RunnerRecord {
     host: 'mac',
     forge: 'gh-overload',
     forgeRunnerId: null,
+    systemId: null,
     name,
     createdAt: 0,
     retiredAt: null,
@@ -190,5 +191,125 @@ describe('livenessFor', () => {
     expect(
       livenessFor({ ...rows[0], container: 'exited', forgeStatus: 'offline' }),
     ).toBe('offline');
+  });
+});
+
+describe('buildStatusReport, a GitLab group', () => {
+  const GITLAB_SCOPE = { level: 'instance' } as const;
+
+  const loaded = {
+    path: '/tmp/grove.yaml',
+    warnings: [],
+    config: {
+      tick: { fast: 120_000, full: 1_800_000 },
+      hosts: { atlas: { type: 'ssh', host: 'atlas' } },
+      forges: { 'gl-chevro': { kind: 'gitlab', url: 'https://git.chevro.fr' } },
+      groups: [
+        {
+          name: 'chevro-dind',
+          forge: 'gl-chevro',
+          scope: GITLAB_SCOPE,
+          placement: { atlas: 3 },
+          stack: 'docker',
+          tags: ['docker', 'dind'],
+        },
+      ],
+    },
+  } as unknown as LoadedConfig;
+
+  function gitlabRecord(index: number, systemId: string | null): RunnerRecord {
+    return {
+      id: index,
+      group: 'chevro-dind',
+      index,
+      host: 'atlas',
+      forge: 'gl-chevro',
+      forgeRunnerId: '48',
+      systemId,
+      name: `grove-chevro-dind-${index}`,
+      createdAt: 0,
+      retiredAt: null,
+    };
+  }
+
+  const observed: ObservedState = {
+    hosts: [{ host: 'atlas', reachable: true, containers: [], workRoots: {} }],
+    forges: [
+      {
+        forge: 'gl-chevro',
+        reachable: true,
+        shared: true,
+        runners: [
+          {
+            runner: {
+              id: '48',
+              name: 'grove-chevro-dind',
+              status: 'online',
+              busy: false,
+              labels: ['docker', 'dind'],
+              managers: [
+                {
+                  systemId: 's_aaaaaaaaaaaa',
+                  status: 'online',
+                  busy: true,
+                  contactedAt: '2026-08-16T10:00:00Z',
+                },
+                { systemId: 'r_bbbbbbbbbbbb', status: 'stale', busy: false },
+              ],
+            },
+            scope: GITLAB_SCOPE,
+          },
+        ],
+      },
+    ],
+  };
+
+  it('carries the manager that belongs to each runner', () => {
+    const report = buildStatusReport(loaded, observed, [
+      gitlabRecord(1, 's_aaaaaaaaaaaa'),
+      gitlabRecord(2, 'r_bbbbbbbbbbbb'),
+    ]);
+
+    expect(
+      report.rows.map((row) => [row.runner, row.systemId, row.managerStatus]),
+    ).toEqual([
+      ['grove-chevro-dind-1', 's_aaaaaaaaaaaa', 'online'],
+      ['grove-chevro-dind-2', 'r_bbbbbbbbbbbb', 'stale'],
+    ]);
+    expect(report.rows[0].forgeStatus).toBe('busy');
+    expect(report.rows[0].contactedAt).toBe('2026-08-16T10:00:00Z');
+    expect(report.rows[1].forgeStatus).toBe('offline');
+  });
+
+  it('leaves the manager fields out when grove has no system id yet', () => {
+    const report = buildStatusReport(loaded, observed, [gitlabRecord(1, null)]);
+    expect(report.rows[0].systemId).toBeUndefined();
+    expect(report.rows[0].managerStatus).toBeUndefined();
+  });
+
+  it('names the entity, its tags and how many managers answer', () => {
+    const report = buildStatusReport(loaded, observed, [
+      gitlabRecord(1, 's_aaaaaaaaaaaa'),
+    ]);
+    expect(report.sharedRunners).toEqual([
+      {
+        forge: 'gl-chevro',
+        group: 'chevro-dind',
+        entityId: '48',
+        description: 'grove-chevro-dind',
+        tags: ['docker', 'dind'],
+        managers: 2,
+        expected: 3,
+      },
+    ]);
+  });
+
+  it('has no shared runner section for a fleet with none', () => {
+    const githubReport = buildStatusReport(
+      loaded,
+      { hosts: [], forges: [] },
+      [],
+    );
+    expect(githubReport.sharedRunners).toEqual([]);
   });
 });

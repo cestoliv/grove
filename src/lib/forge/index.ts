@@ -19,12 +19,28 @@ export {
   registrationUrl,
   runnersPath,
 } from './github-scope.js';
-export { resolveForgeToken } from './token.js';
+export {
+  GITLAB_MAX_PAGES,
+  GITLAB_PER_PAGE,
+  GitlabClient,
+  type GitlabClientOptions,
+} from './gitlab.js';
+export {
+  GITLAB_API_SUFFIX,
+  type GitlabRunnerType,
+  gitlabApiBase,
+  gitlabAuthHint,
+  namespacePath,
+  runnersListPath,
+  runnerTypeFor,
+} from './gitlab-scope.js';
+export { glabHost, resolveForgeToken } from './token.js';
 export {
   type ForgeClient,
   ForgeError,
   type ForgeErrorDetails,
   type ForgeRunner,
+  type ForgeRunnerManager,
   type RegistrationRequest,
   type RunnerRegistration,
 } from './types.js';

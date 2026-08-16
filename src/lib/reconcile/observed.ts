@@ -1,7 +1,9 @@
 import type { Scope } from '../config/index.js';
 import type { ForgeRunner } from '../forge/index.js';
 import type { DockerContainer, VolumeCheck } from '../stack/index.js';
+import type { RunnerRecord } from '../state/index.js';
 import type { ClassifiedRunner, ObservedRunner } from './ownership.js';
+import { expandSharedSightings } from './shared.js';
 
 export interface HostObservation {
   host: string;
@@ -13,6 +15,9 @@ export interface HostObservation {
   containers: DockerContainer[];
   // One entry per group placed on this host, keyed by group name.
   workRoots: Record<string, VolumeCheck>;
+  // Keyed by container name. Present for a GitLab container that has run at
+  // least once, absent everywhere else.
+  systemIds?: Record<string, string>;
 }
 
 export interface ObservedForgeRunner {
@@ -26,6 +31,8 @@ export interface ForgeObservation {
   forge: string;
   reachable: boolean;
   reason?: string;
+  // true when one runner entity covers a whole group, as GitLab does.
+  shared?: boolean;
   runners: ObservedForgeRunner[];
 }
 
@@ -39,6 +46,10 @@ export interface FlattenOptions {
   // or a forge never reads as absence. A caller that only reports sets it
   // false, so the operator still sees the last thing grove knew.
   skipUnreachable: boolean;
+  // A shared forge lists one entity for a whole group, and only the records
+  // say which container each manager belongs to. Without them, a shared
+  // forge contributes nothing, which is the safe answer.
+  records?: RunnerRecord[];
 }
 
 export function flattenObserved(
@@ -56,6 +67,10 @@ export function flattenObserved(
   }
   for (const forge of observed.forges) {
     if (options.skipUnreachable && !forge.reachable) {
+      continue;
+    }
+    if (forge.shared === true) {
+      seen.push(...expandSharedSightings(forge, options.records ?? []));
       continue;
     }
     for (const listed of forge.runners) {

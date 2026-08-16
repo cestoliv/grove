@@ -54,6 +54,43 @@ export function isManagedName(name: string): boolean {
   return parseManagedName(name) !== null;
 }
 
+// The description grove gives the one runner entity a GitLab group owns. It
+// carries no index, because every seat in the group shares it.
+export function sharedRunnerName(group: string): string {
+  return `${GROVE_PREFIX}${group}`;
+}
+
+const SHARED_NAME = /^grove-(.+)$/;
+
+// `grove-chevro-2` is a seat of group `chevro` and an entity of group
+// `chevro-2` at the same time. grove reads it as the seat, and refuses to
+// read it as an entity, so one string never means two runners.
+export function parseSharedName(name: string): { group: string } | null {
+  if (parseManagedName(name) !== null) {
+    return null;
+  }
+  const match = SHARED_NAME.exec(name);
+  if (match === null) {
+    return null;
+  }
+  const group = match[1];
+  if (group.length > GROUP_NAME_MAX_LENGTH || !GROUP_NAME_PATTERN.test(group)) {
+    return null;
+  }
+  return { group };
+}
+
+// config.toml lands here after registration, and it holds the glrt token, so
+// this directory is created 0700 and never sits inside the work dir that
+// `apply --clean` wipes.
+export function runnerConfigDir(
+  root: string,
+  group: string,
+  index: number,
+): string {
+  return `${runnerDir(root, group, index)}-config`;
+}
+
 export function resolveWorkRoot(host: HostConfig, group: GroupConfig): string {
   return group.work_root ?? host.work_root ?? DEFAULT_WORK_ROOT;
 }

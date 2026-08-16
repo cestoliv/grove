@@ -39,6 +39,7 @@ export async function runTeardown(
       observed,
       fleet.store.activeRunners(),
       {
+        registrations: fleet.store.activeGroupRegistrations(),
         ...(options.includeUnmanaged === undefined
           ? {}
           : { includeUnmanaged: options.includeUnmanaged }),

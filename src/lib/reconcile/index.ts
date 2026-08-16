@@ -11,6 +11,7 @@ export {
   type ExecutionResult,
   executeActions,
   FORGE_CONCURRENCY,
+  persistSystemIds,
 } from './execute.js';
 export { createLimiter, type Limiter } from './limiter.js';
 export {
@@ -35,4 +36,11 @@ export {
   type OwnershipClass,
 } from './ownership.js';
 export { type ReconcileOptions, reconcile } from './planner.js';
+export {
+  expandSharedSightings,
+  groupForgeKey,
+  orphanSharedEntities,
+  type SharedEntity,
+  sharedEntities,
+} from './shared.js';
 export { planTeardown, type TeardownOptions } from './teardown.js';

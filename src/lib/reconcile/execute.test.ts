@@ -14,7 +14,7 @@ import {
   type Transport,
 } from '../transport/index.js';
 import type { Action } from './actions.js';
-import { executeActions } from './execute.js';
+import { executeActions, persistSystemIds } from './execute.js';
 import type { HostObservation } from './observed.js';
 
 const SCOPE = { level: 'organization', target: 'Overload-coach' } as const;
@@ -492,5 +492,481 @@ describe('executeActions, failures and reports', () => {
       'enter',
       'leave',
     ]);
+  });
+});
+
+describe('executeActions, a shared registration', () => {
+  const GITLAB_SCOPE = { level: 'instance' } as const;
+
+  function gitlabConfig(): GroveConfig {
+    return {
+      tick: { fast: 120_000, full: 1_800_000 },
+      hosts: {
+        atlas: { type: 'ssh', host: 'atlas', work_root: '/PROD/local/grove' },
+      },
+      forges: { 'gl-chevro': { kind: 'gitlab', url: 'https://git.chevro.fr' } },
+      groups: [
+        {
+          name: 'chevro-dind',
+          forge: 'gl-chevro',
+          scope: GITLAB_SCOPE,
+          placement: { atlas: 2 },
+          stack: 'docker',
+          tags: ['docker', 'dind'],
+          concurrent: 4,
+        },
+      ],
+    } as GroveConfig;
+  }
+
+  function gitlabContext(transport: FakeTransport, client: FakeForgeClient) {
+    return {
+      config: gitlabConfig(),
+      hosts: new Map([
+        [
+          'atlas',
+          {
+            host: 'atlas',
+            reachable: true,
+            platform: 'Linux',
+            home: '/root',
+            containers: [],
+            workRoots: {},
+          } as HostObservation,
+        ],
+      ]),
+      stacks: new Map([
+        ['atlas', new DockerStack({ transport, host: 'atlas' })],
+      ]),
+      forgeClients: new Map([['gl-chevro', client]]),
+      store,
+      log: () => undefined,
+    };
+  }
+
+  function sharedClient(): FakeForgeClient {
+    return new FakeForgeClient('gl-chevro', {
+      kind: 'gitlab',
+      sharedRegistration: true,
+    });
+  }
+
+  function createSeat(index: number): Action {
+    return {
+      kind: 'create-runner',
+      host: 'atlas',
+      forge: 'gl-chevro',
+      group: 'chevro-dind',
+      index,
+      name: `grove-chevro-dind-${index}`,
+      destructive: false,
+    };
+  }
+
+  it('mints one entity for the whole group and reuses it for every seat', async () => {
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    const client = sharedClient();
+    const result = await executeActions(
+      [createSeat(1), createSeat(2)],
+      gitlabContext(transport, client),
+    );
+
+    expect(result.failed).toEqual([]);
+    expect(client.registrations).toHaveLength(1);
+    expect(client.registrations[0].name).toBe('grove-chevro-dind');
+    expect(client.registrations[0].tags).toEqual(['docker', 'dind']);
+    expect(store.activeGroupRegistrations()).toHaveLength(1);
+    expect(store.activeRunners().map((record) => record.forgeRunnerId)).toEqual(
+      ['101', '101'],
+    );
+  });
+
+  it('stores the token once and never logs it', async () => {
+    const lines: string[] = [];
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    const client = sharedClient();
+    await executeActions([createSeat(1)], {
+      ...gitlabContext(transport, client),
+      log: (line: string) => lines.push(line),
+    });
+
+    const [registration] = store.activeGroupRegistrations();
+    expect(registration.token).toBe('fake-registration-token-1');
+    expect(lines.join('\n')).not.toContain(registration.token);
+  });
+
+  it('prepares a config directory and runs a gitlab-runner container', async () => {
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    await executeActions(
+      [createSeat(1)],
+      gitlabContext(transport, sharedClient()),
+    );
+
+    const lines = transport.commandLines();
+    expect(
+      lines.some((line) =>
+        line.includes("chmod 0700 '/PROD/local/grove/chevro-dind-1-config'"),
+      ),
+    ).toBe(true);
+    const run = lines.find((line) => line.startsWith('docker run'));
+    expect(run).toContain(
+      '--volume /PROD/local/grove/chevro-dind-1-config:/etc/gitlab-runner',
+    );
+    expect(run).toContain('gitlab-runner register');
+    expect(run).toContain("printf 'concurrent = %s\\n' '4'");
+  });
+
+  it('calls nothing at the forge for a second seat added later', async () => {
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    const client = sharedClient();
+    await executeActions([createSeat(1)], gitlabContext(transport, client));
+    await executeActions([createSeat(2)], gitlabContext(transport, client));
+    expect(client.registrations).toHaveLength(1);
+  });
+
+  it('mints again when the planner says the entity is gone', async () => {
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    const client = sharedClient();
+    await executeActions([createSeat(1)], gitlabContext(transport, client));
+    const [before] = store.activeGroupRegistrations();
+    await executeActions(
+      [
+        {
+          ...createSeat(2),
+          renewRegistration: before.forgeRunnerId,
+          destructive: true,
+        } as Action,
+      ],
+      gitlabContext(transport, client),
+    );
+
+    expect(client.registrations).toHaveLength(2);
+    expect(store.activeGroupRegistrations()).toHaveLength(1);
+    expect(store.activeGroupRegistrations()[0].forgeRunnerId).toBe('102');
+  });
+
+  it('keeps a row another process minted between plan and apply', async () => {
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    const client = sharedClient();
+    await executeActions([createSeat(1)], gitlabContext(transport, client));
+    const [before] = store.activeGroupRegistrations();
+
+    // The planner judged id 48 gone. The row now holds a different id, so
+    // this apply is about to destroy a token it never read.
+    await executeActions(
+      [
+        {
+          ...createSeat(2),
+          renewRegistration: '48',
+          destructive: true,
+        } as Action,
+      ],
+      gitlabContext(transport, client),
+    );
+
+    expect(client.registrations).toHaveLength(1);
+    const active = store.activeGroupRegistrations();
+    expect(active).toHaveLength(1);
+    expect(active[0].id).toBe(before.id);
+    expect(active[0].forgeRunnerId).toBe(before.forgeRunnerId);
+  });
+
+  it('deletes the entity and retires the row that held its token', async () => {
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    const client = sharedClient();
+    await executeActions([createSeat(1)], gitlabContext(transport, client));
+    const [registration] = store.activeGroupRegistrations();
+
+    const result = await executeActions(
+      [
+        {
+          kind: 'delete-shared-runner',
+          host: 'atlas',
+          forge: 'gl-chevro',
+          scope: GITLAB_SCOPE,
+          group: 'chevro-dind',
+          name: 'grove-chevro-dind',
+          forgeRunnerId: registration.forgeRunnerId,
+          registrationId: registration.id,
+          destructive: true,
+        } as Action,
+      ],
+      gitlabContext(transport, client),
+    );
+
+    expect(result.failed).toEqual([]);
+    expect(client.deleted).toEqual([
+      { scope: GITLAB_SCOPE, id: registration.forgeRunnerId },
+    ]);
+    expect(store.activeGroupRegistrations()).toEqual([]);
+  });
+
+  it('takes the entity back down when the row cannot be stored', async () => {
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    const client = sharedClient();
+    // Every call reaches the real store except the one insert, so the failure
+    // lands exactly where the entity already exists and the row does not.
+    const failingStore = new Proxy(store, {
+      get(target, property, receiver) {
+        if (property === 'createGroupRegistration') {
+          return () => {
+            throw new Error('the state database is read only');
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as StateStore;
+
+    const result = await executeActions([createSeat(1), createSeat(2)], {
+      ...gitlabContext(transport, client),
+      store: failingStore,
+    });
+
+    // The forge saw one create and one delete, so grove left nothing behind.
+    expect(client.registrations).toHaveLength(1);
+    expect(client.deleted).toEqual([{ scope: GITLAB_SCOPE, id: '101' }]);
+    expect(store.activeGroupRegistrations()).toEqual([]);
+    // No seat may start against a token no row holds.
+    expect(result.applied).toEqual([]);
+    expect(result.failed.map((failure) => failure.error)).toEqual([
+      'the state database is read only',
+      'the state database is read only',
+    ]);
+  });
+
+  it('mints once for a group whose seats sit on two hosts', async () => {
+    const atlas = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    const mac = new FakeTransport('mac').on('docker run', {
+      stdout: 'cafe\n',
+    });
+    const client = sharedClient();
+    const base = gitlabContext(atlas, client);
+    const spread = {
+      ...base,
+      config: {
+        ...base.config,
+        hosts: {
+          ...base.config.hosts,
+          mac: { type: 'local', work_root: '/Volumes/ci/grove' },
+        },
+        groups: [{ ...base.config.groups[0], placement: { atlas: 1, mac: 1 } }],
+      } as GroveConfig,
+      hosts: new Map([
+        ...base.hosts,
+        [
+          'mac',
+          {
+            host: 'mac',
+            reachable: true,
+            platform: 'Darwin',
+            home: '/Users/olivier',
+            containers: [],
+            workRoots: {},
+          } as HostObservation,
+        ],
+      ]),
+      stacks: new Map([
+        ...base.stacks,
+        ['mac', new DockerStack({ transport: mac, host: 'mac' })],
+      ]),
+    };
+
+    const result = await executeActions(
+      [createSeat(1), { ...createSeat(2), host: 'mac' } as Action],
+      spread,
+    );
+
+    expect(result.failed).toEqual([]);
+    // The two hosts ran in two parallel buckets and still share one entity.
+    expect(client.registrations).toHaveLength(1);
+    expect(store.activeGroupRegistrations()).toHaveLength(1);
+    expect(
+      store
+        .activeRunners()
+        .map((record) => [record.host, record.forgeRunnerId]),
+    ).toEqual([
+      ['atlas', '101'],
+      ['mac', '101'],
+    ]);
+  });
+
+  it('deletes an entity whose action carries no host', async () => {
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef\n',
+    });
+    const client = sharedClient();
+    await executeActions([createSeat(1)], gitlabContext(transport, client));
+    const [registration] = store.activeGroupRegistrations();
+
+    const result = await executeActions(
+      [
+        {
+          kind: 'delete-shared-runner',
+          forge: 'gl-chevro',
+          scope: GITLAB_SCOPE,
+          group: 'chevro-dind',
+          name: 'grove-chevro-dind',
+          forgeRunnerId: registration.forgeRunnerId,
+          registrationId: registration.id,
+          destructive: true,
+        } as Action,
+      ],
+      gitlabContext(transport, client),
+    );
+
+    expect(result.failed).toEqual([]);
+    expect(client.deleted).toEqual([
+      { scope: GITLAB_SCOPE, id: registration.forgeRunnerId },
+    ]);
+    expect(store.activeGroupRegistrations()).toEqual([]);
+  });
+});
+
+describe('persistSystemIds', () => {
+  it('writes what a host reported onto the record it belongs to', () => {
+    const record = store.createRunner({
+      group: 'chevro-dind',
+      index: 1,
+      host: 'atlas',
+      forge: 'gl-chevro',
+      name: 'grove-chevro-dind-1',
+    });
+    const learned = persistSystemIds(
+      {
+        hosts: [
+          {
+            host: 'atlas',
+            reachable: true,
+            containers: [],
+            workRoots: {},
+            systemIds: { 'grove-chevro-dind-1': 's_aaaaaaaaaaaa' },
+          },
+        ],
+        forges: [],
+      },
+      store.activeRunners(),
+      store,
+    );
+
+    expect(learned).toBe(1);
+    expect(store.getRunner(record.id)?.systemId).toBe('s_aaaaaaaaaaaa');
+  });
+
+  it('writes nothing when the id has not changed', () => {
+    const record = store.createRunner({
+      group: 'chevro-dind',
+      index: 1,
+      host: 'atlas',
+      forge: 'gl-chevro',
+      name: 'grove-chevro-dind-1',
+    });
+    store.setSystemId(record.id, 's_aaaaaaaaaaaa');
+    const observed = {
+      hosts: [
+        {
+          host: 'atlas',
+          reachable: true,
+          containers: [],
+          workRoots: {},
+          systemIds: { 'grove-chevro-dind-1': 's_aaaaaaaaaaaa' },
+        },
+      ],
+      forges: [],
+    };
+    expect(persistSystemIds(observed, store.activeRunners(), store)).toBe(0);
+  });
+
+  it('keys a record by host and name, not by name alone', () => {
+    const atlas = store.createRunner({
+      group: 'chevro-dind',
+      index: 1,
+      host: 'atlas',
+      forge: 'gl-chevro',
+      name: 'grove-chevro-dind-1',
+    });
+    const mac = store.createRunner({
+      group: 'chevro-dind',
+      index: 2,
+      host: 'mac',
+      forge: 'gl-chevro',
+      name: 'grove-chevro-dind-2',
+    });
+    // `runners_active_name` stops two active rows sharing a name, so the
+    // colliding pair is built here rather than stored. The function takes
+    // whatever records it is handed, and must not drop one of them.
+    const records = [atlas, { ...mac, name: atlas.name }];
+    const learned = persistSystemIds(
+      {
+        hosts: [
+          {
+            host: 'atlas',
+            reachable: true,
+            containers: [],
+            workRoots: {},
+            systemIds: { 'grove-chevro-dind-1': 's_aaaaaaaaaaaa' },
+          },
+          {
+            host: 'mac',
+            reachable: true,
+            containers: [],
+            workRoots: {},
+            systemIds: { 'grove-chevro-dind-1': 'r_bbbbbbbbbbbb' },
+          },
+        ],
+        forges: [],
+      },
+      records,
+      store,
+    );
+
+    expect(learned).toBe(2);
+    expect(store.getRunner(atlas.id)?.systemId).toBe('s_aaaaaaaaaaaa');
+    expect(store.getRunner(mac.id)?.systemId).toBe('r_bbbbbbbbbbbb');
+  });
+
+  it('refuses a name that belongs to a record on another host', () => {
+    store.createRunner({
+      group: 'chevro-dind',
+      index: 1,
+      host: 'atlas',
+      forge: 'gl-chevro',
+      name: 'grove-chevro-dind-1',
+    });
+    const learned = persistSystemIds(
+      {
+        hosts: [
+          {
+            host: 'mac',
+            reachable: true,
+            containers: [],
+            workRoots: {},
+            systemIds: { 'grove-chevro-dind-1': 's_aaaaaaaaaaaa' },
+          },
+        ],
+        forges: [],
+      },
+      store.activeRunners(),
+      store,
+    );
+    expect(learned).toBe(0);
   });
 });

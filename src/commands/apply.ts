@@ -27,7 +27,10 @@ export async function runApply(
   const fleet: FleetContext = opened;
 
   try {
-    const { observed, actions, report } = await planFleet(fleet, options);
+    const { observed, actions, report } = await planFleet(fleet, {
+      ...options,
+      recordSystemIds: true,
+    });
     write(
       renderPlanReport(report, {
         closing: 'apply',

@@ -2,6 +2,7 @@ import type { ForgeKind, Scope } from '../config/index.js';
 import type {
   ForgeClient,
   ForgeRunner,
+  ForgeRunnerManager,
   RegistrationRequest,
   RunnerRegistration,
 } from './types.js';
@@ -55,7 +56,34 @@ export class FakeForgeClient implements ForgeClient {
       status: runner.status ?? 'online',
       busy: runner.busy ?? false,
       labels: runner.labels ?? [],
+      ...(runner.managers === undefined ? {} : { managers: runner.managers }),
     });
+    return this;
+  }
+
+  addManager(
+    runnerId: string,
+    manager: Partial<ForgeRunnerManager> & { systemId: string },
+  ): this {
+    const entity = this.runners.find((runner) => runner.id === runnerId);
+    if (entity === undefined) {
+      throw new Error(`no runner ${runnerId} to attach a manager to`);
+    }
+    entity.managers = [
+      ...(entity.managers ?? []),
+      {
+        systemId: manager.systemId,
+        status: manager.status ?? 'online',
+        busy: manager.busy ?? false,
+        ...(manager.contactedAt === undefined
+          ? {}
+          : { contactedAt: manager.contactedAt }),
+        ...(manager.version === undefined ? {} : { version: manager.version }),
+        ...(manager.ipAddress === undefined
+          ? {}
+          : { ipAddress: manager.ipAddress }),
+      },
+    ];
     return this;
   }
 
@@ -76,17 +104,43 @@ export class FakeForgeClient implements ForgeClient {
   ): Promise<RunnerRegistration> {
     this.guard('createRegistration');
     this.registrations.push(request);
+
+    if (!this.sharedRegistration) {
+      this.minted += 1;
+      return {
+        token: `fake-registration-token-${this.minted}`,
+        url: `https://forge.test/${scopeLabel(request.scope)}`,
+      };
+    }
+
+    // GitLab mints a new entity on every POST. Reusing one is grove's job,
+    // through the row it stores, so the fake never does it here.
     this.minted += 1;
+    const runnerId = String(100 + this.minted);
+    this.runners.push({
+      id: runnerId,
+      name: request.name,
+      status: 'online',
+      busy: false,
+      labels: request.tags ?? [],
+      managers: [],
+    });
     return {
       token: `fake-registration-token-${this.minted}`,
       url: `https://forge.test/${scopeLabel(request.scope)}`,
+      runnerId,
     };
   }
 
   async listRunners(scope: Scope): Promise<ForgeRunner[]> {
     this.guard('listRunners');
     this.scopesListed.push(scope);
-    return this.runners.map((runner) => ({ ...runner }));
+    return this.runners.map((runner) => ({
+      ...runner,
+      ...(runner.managers === undefined
+        ? {}
+        : { managers: runner.managers.map((manager) => ({ ...manager })) }),
+    }));
   }
 
   async deleteRunner(scope: Scope, id: string): Promise<void> {

@@ -1,6 +1,6 @@
 import type { GroveConfig } from '../config/index.js';
 import { DEFAULT_DRAIN_TIMEOUT_MS } from '../stack/index.js';
-import type { RunnerRecord } from '../state/index.js';
+import type { GroupRegistrationRecord, RunnerRecord } from '../state/index.js';
 import type { Action } from './actions.js';
 import {
   describeWhere,
@@ -9,6 +9,7 @@ import {
   type ObservedState,
 } from './observed.js';
 import { classifyRunners, isDestroyable } from './ownership.js';
+import { groupForgeKey, sharedEntities } from './shared.js';
 
 // A forge that refused and a forge grove never asked both mean the same
 // thing here: nobody can say what that forge holds, so nothing goes.
@@ -36,6 +37,8 @@ function forgeGuard(
 export interface TeardownOptions {
   includeUnmanaged?: boolean;
   drainTimeoutMs?: number;
+  // The rows that hold each group's shared token, retired with the entity.
+  registrations?: GroupRegistrationRecord[];
 }
 
 /**
@@ -61,6 +64,25 @@ export function planTeardown(
   );
   const hosts = new Map(observed.hosts.map((entry) => [entry.host, entry]));
   const forges = new Map(observed.forges.map((entry) => [entry.forge, entry]));
+  // A forge that gives a whole group one entity. The config says so, and a
+  // forge whose kind changed under a running fleet is caught by what the
+  // observation itself reported.
+  const sharedForges = new Set([
+    ...Object.entries(desired.forges)
+      .filter(([, forge]) => forge.kind === 'gitlab')
+      .map(([name]) => name),
+    ...observed.forges
+      .filter((observation) => observation.shared === true)
+      .map((observation) => observation.forge),
+  ]);
+  const registrationByGroup = new Map(
+    (options.registrations ?? [])
+      .filter((row) => row.retiredAt === null)
+      .map((row) => [groupForgeKey(row.group, row.forge), row] as const),
+  );
+  // Runner names whose whole removal sequence made it into the plan. Only a
+  // group where every one of those made it may lose its entity.
+  const tornDown = new Set<string>();
 
   const degraded: Action[] = [];
   const removals: Action[] = [];
@@ -90,7 +112,10 @@ export function planTeardown(
 
   // A host or a forge that did not answer is dropped here, so silence never
   // reads as absence and grove never deletes half of what it cannot see.
-  const seen = flattenObserved(observed, { skipUnreachable: true });
+  const seen = flattenObserved(observed, {
+    skipUnreachable: true,
+    records,
+  });
 
   for (const entry of classifyRunners(seen, records)) {
     if (entry.ownership === 'foreign') {
@@ -208,7 +233,14 @@ export function planTeardown(
         destructive: true,
       });
     }
-    if (entry.forgeRunner !== undefined && entry.scope !== undefined) {
+    // A shared forge hands the whole group one entity, and no manager of it
+    // has a registration of its own to drop. The entity pass below is what
+    // removes it, once every manager has gone.
+    if (
+      entry.forgeRunner !== undefined &&
+      entry.scope !== undefined &&
+      !(entry.forge !== undefined && sharedForges.has(entry.forge))
+    ) {
       // A sighting always carries the forge it came from. Deleting at the
       // wrong forge is unrecoverable, so a missing name is a bug that stops
       // the pass rather than a blank that travels into the action.
@@ -246,6 +278,70 @@ export function planTeardown(
         ...(host === undefined ? {} : { host }),
         name: entry.name,
         recordId: entry.record.id,
+        destructive: true,
+      });
+    }
+    tornDown.add(entry.name);
+  }
+
+  // The entity goes after every manager, and only when every manager went.
+  for (const observation of observed.forges) {
+    if (observation.shared !== true || !observation.reachable) {
+      continue;
+    }
+    for (const entity of sharedEntities(observation, records)) {
+      const registration = registrationByGroup.get(
+        groupForgeKey(entity.group, entity.forge),
+      );
+      // Only a row naming this entity belongs to it. A row for the group
+      // that names another id holds that other entity's token, and GitLab
+      // shows a glrt token once, so retiring it here would lose the only
+      // copy of a token grove still needs.
+      const ownRegistration =
+        registration?.forgeRunnerId === entity.runner.id
+          ? registration
+          : undefined;
+      // A record pointing at the entity, or such a row, proves grove minted it.
+      const owned = entity.records.length > 0 || ownRegistration !== undefined;
+
+      if (!owned && !includeUnmanaged) {
+        // Name matches the convention, nothing backs it. The unmanaged cell,
+        // which a name collision alone never opens.
+        reports.push({
+          kind: 'report-unmanaged',
+          name: entity.runner.name,
+          where: `runner entity ${entity.runner.id} at ${entity.forge}`,
+          destructive: false,
+        });
+        continue;
+      }
+      if (
+        owned &&
+        !entity.records.every((record) => tornDown.has(record.name))
+      ) {
+        degraded.push({
+          kind: 'report-degraded',
+          target: entity.runner.name,
+          reason: `grove could not tear down every manager of group "${entity.group}", so its runner entity at ${entity.forge} stays`,
+          destructive: false,
+        });
+        continue;
+      }
+
+      // The highest-index seat, so the delete queues behind that host's own
+      // removals. An entity with no seat left runs in a bucket of its own.
+      const last = entity.records.at(-1);
+      removals.push({
+        kind: 'delete-shared-runner',
+        ...(last === undefined ? {} : { host: last.host }),
+        forge: entity.forge,
+        scope: entity.scope,
+        group: entity.group,
+        name: entity.runner.name,
+        forgeRunnerId: entity.runner.id,
+        ...(ownRegistration === undefined
+          ? {}
+          : { registrationId: ownRegistration.id }),
         destructive: true,
       });
     }

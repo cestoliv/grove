@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import type { Scope } from '../config/index.js';
 import type { DockerContainer } from '../stack/index.js';
+import type { RunnerRecord } from '../state/index.js';
 import {
   describeWhere,
+  type ForgeObservation,
   flattenObserved,
   type ObservedState,
 } from './observed.js';
@@ -116,5 +119,59 @@ describe('describeWhere', () => {
 
   it('says nothing about a record with nothing behind it', () => {
     expect(describeWhere(classified({ ownership: 'record-only' }))).toBe('');
+  });
+});
+
+describe('flattenObserved, a forge that shares one entity', () => {
+  const scope: Scope = { level: 'instance' };
+
+  const shared: ForgeObservation = {
+    forge: 'gl-chevro',
+    reachable: true,
+    shared: true,
+    runners: [
+      {
+        runner: {
+          id: '48',
+          name: 'grove-chevro-dind',
+          status: 'online',
+          busy: false,
+          labels: ['docker'],
+          managers: [
+            { systemId: 's_aaaaaaaaaaaa', status: 'online', busy: false },
+          ],
+        },
+        scope,
+      },
+    ],
+  };
+
+  const record: RunnerRecord = {
+    id: 1,
+    group: 'chevro-dind',
+    index: 1,
+    host: 'atlas',
+    forge: 'gl-chevro',
+    forgeRunnerId: '48',
+    systemId: 's_aaaaaaaaaaaa',
+    name: 'grove-chevro-dind-1',
+    createdAt: 1,
+    retiredAt: null,
+  };
+
+  it('names the sighting after the record, not after the entity', () => {
+    const seen = flattenObserved(
+      { hosts: [], forges: [shared] },
+      { skipUnreachable: true, records: [record] },
+    );
+    expect(seen.map((entry) => entry.name)).toEqual(['grove-chevro-dind-1']);
+  });
+
+  it('sees nothing at a shared forge when it is given no record', () => {
+    const seen = flattenObserved(
+      { hosts: [], forges: [shared] },
+      { skipUnreachable: true },
+    );
+    expect(seen).toEqual([]);
   });
 });

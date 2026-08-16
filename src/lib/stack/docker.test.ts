@@ -3,6 +3,7 @@ import type { GroupConfig, HostConfig } from '../config/index.js';
 import { FakeTransport } from '../transport/index.js';
 import { DockerStack } from './docker.js';
 import { buildRunnerSpec, type RunnerSpec } from './docker-args.js';
+import { buildGitlabRunnerSpec, type GitlabRunnerSpec } from './gitlab-args.js';
 
 const host = { type: 'local', work_root: '/Volumes/ci/grove' } as HostConfig;
 const group = {
@@ -203,5 +204,124 @@ describe('DockerStack.logs', () => {
     expect(transport.commandLines()[0]).toBe(
       'docker logs --follow --tail 10 grove-overload-arm-1',
     );
+  });
+});
+
+describe('DockerStack, gitlab-runner', () => {
+  const gitlabHostConfig = {
+    type: 'ssh',
+    host: 'atlas',
+    work_root: '/PROD/local/grove',
+  } as HostConfig;
+
+  const gitlabGroup = {
+    name: 'chevro-dind',
+    stack: 'docker',
+    tags: ['docker'],
+  } as GroupConfig;
+
+  function gitlabSpec(): GitlabRunnerSpec {
+    return buildGitlabRunnerSpec({
+      group: gitlabGroup,
+      host: gitlabHostConfig,
+      index: 1,
+      registration: {
+        token: ['glrt', 'K1l2M3n4O5p6Q7r8S9t0'].join('-'),
+        url: 'https://git.chevro.fr',
+        runnerId: '48',
+      },
+    });
+  }
+
+  it('creates the config directory only its owner can read', async () => {
+    const transport = new FakeTransport('atlas');
+    await stack(transport).prepareConfigDir(gitlabSpec(), { wipe: false });
+    expect(transport.commandLines()[0]).toBe(
+      "sh -c mkdir -p '/PROD/local/grove/chevro-dind-1-config' && " +
+        "chmod 0700 '/PROD/local/grove/chevro-dind-1-config'",
+    );
+  });
+
+  it('wipes the config directory when a runner is created, so it registers again', async () => {
+    const transport = new FakeTransport('atlas');
+    await stack(transport).prepareConfigDir(gitlabSpec(), { wipe: true });
+    expect(transport.commandLines()[0]).toContain(
+      "rm -rf '/PROD/local/grove/chevro-dind-1-config'",
+    );
+  });
+
+  it('refuses to wipe a directory that is not a config directory', async () => {
+    const transport = new FakeTransport('atlas');
+    const bad = { ...gitlabSpec(), configDir: '/etc' };
+    await expect(
+      stack(transport).prepareConfigDir(bad, { wipe: true }),
+    ).rejects.toThrow(/refusing to wipe/);
+    expect(transport.calls).toEqual([]);
+  });
+
+  it('runs the gitlab-runner container and returns its id', async () => {
+    const transport = new FakeTransport('atlas').on('docker run', {
+      stdout: 'beef42\n',
+    });
+    const id = await stack(transport).createGitlabRunner(gitlabSpec());
+    expect(id).toBe('beef42');
+    const line = transport.commandLines()[0];
+    expect(line).toContain('--name grove-chevro-dind-1');
+    expect(line).toContain(
+      '--volume /PROD/local/grove/chevro-dind-1-config:/etc/gitlab-runner',
+    );
+    expect(line).toContain('--entrypoint sh');
+  });
+
+  it('reads a system id for every runner it was given, in one exec', async () => {
+    const transport = new FakeTransport('atlas').on('sh -c set --', {
+      stdout:
+        'grove-chevro-dind-1\ts_aaaaaaaaaaaa\ngrove-chevro-dind-3\tr_cccccccccccc\n',
+    });
+    const ids = await stack(transport).readSystemIds([
+      {
+        name: 'grove-chevro-dind-1',
+        configDir: '/PROD/local/grove/chevro-dind-1-config',
+      },
+      {
+        name: 'grove-chevro-dind-2',
+        configDir: '/PROD/local/grove/chevro-dind-2-config',
+      },
+      {
+        name: 'grove-chevro-dind-3',
+        configDir: '/PROD/local/grove/chevro-dind-3-config',
+      },
+    ]);
+
+    expect(ids).toEqual({
+      'grove-chevro-dind-1': 's_aaaaaaaaaaaa',
+      'grove-chevro-dind-3': 'r_cccccccccccc',
+    });
+    expect(transport.calls).toHaveLength(1);
+    expect(transport.calls[0].args[1]).toContain(
+      "'/PROD/local/grove/chevro-dind-1-config/.runner_system_id'",
+    );
+  });
+
+  it('asks nothing of the host when there is nothing to read', async () => {
+    const transport = new FakeTransport('atlas');
+    expect(await stack(transport).readSystemIds([])).toEqual({});
+    expect(transport.calls).toEqual([]);
+  });
+
+  it('answers with nothing rather than failing the pass when the exec goes wrong', async () => {
+    const transport = new FakeTransport('atlas').fail(
+      'sh -c set --',
+      'sh: cannot execute',
+      127,
+    );
+    expect(
+      await stack(transport).readSystemIds([
+        {
+          name: 'grove-chevro-dind-1',
+          configDir: '/PROD/local/grove/chevro-dind-1-config',
+        },
+      ]),
+    ).toEqual({});
   });
 });

@@ -58,6 +58,12 @@ export function validateReferences(config: GroveConfig): ConfigIssue[] {
           message: `labels belong to GitHub. Forge "${group.forge}" is a GitLab forge, so use tags.`,
         });
       }
+      if (forge.kind === 'gitlab' && /-\d+$/.test(group.name)) {
+        issues.push({
+          path: `${base}.name`,
+          message: `a GitLab group owns one runner entity described as "grove-${group.name}", and grove cannot tell that name apart from a seat of another group. Rename the group so it does not end in a dash and digits.`,
+        });
+      }
     }
 
     if (group.image !== undefined && group.build !== undefined) {

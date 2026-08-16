@@ -1,8 +1,10 @@
+import { chmodSync, mkdirSync, statSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { SCHEMA_VERSION } from './migrations.js';
+import { MIGRATIONS, SCHEMA_VERSION } from './migrations.js';
 import { StateStore } from './store.js';
 
 let store: StateStore;
@@ -51,6 +53,7 @@ describe('StateStore', () => {
       host: 'mac',
       forge: 'gh-overload',
       forgeRunnerId: null,
+      systemId: null,
       name: 'grove-overload-arm-1',
       createdAt: 1_001,
       retiredAt: null,
@@ -143,5 +146,157 @@ describe('StateStore.open', () => {
     expect(second.getRunner(id)?.name).toBe('grove-ios-1');
     expect(second.schemaVersion()).toBe(SCHEMA_VERSION);
     second.close();
+  });
+});
+
+describe('StateStore, system ids', () => {
+  it('starts with no system id and learns one later', () => {
+    const id = create();
+    expect(store.getRunner(id)?.systemId).toBeNull();
+    store.setSystemId(id, 's_aaaaaaaaaaaa');
+    expect(store.getRunner(id)?.systemId).toBe('s_aaaaaaaaaaaa');
+  });
+
+  it('replaces a system id when a recreated container generates a new one', () => {
+    const id = create();
+    store.setSystemId(id, 's_aaaaaaaaaaaa');
+    store.setSystemId(id, 'r_bbbbbbbbbbbb');
+    expect(store.getRunner(id)?.systemId).toBe('r_bbbbbbbbbbbb');
+  });
+});
+
+describe('StateStore, group registrations', () => {
+  function register(group = 'chevro-dind', forge = 'gl-chevro') {
+    return store.createGroupRegistration({
+      group,
+      forge,
+      forgeRunnerId: '48',
+      url: 'https://git.chevro.fr',
+      token: ['glrt', 'K1l2M3n4O5p6Q7r8S9t0'].join('-'),
+    });
+  }
+
+  it('stores the entity id and the token the group registers against', () => {
+    const record = register();
+    expect(record).toMatchObject({
+      group: 'chevro-dind',
+      forge: 'gl-chevro',
+      forgeRunnerId: '48',
+      url: 'https://git.chevro.fr',
+      retiredAt: null,
+    });
+    expect(record.token).toContain('glrt-');
+    expect(record.createdAt).toBeGreaterThan(0);
+  });
+
+  it('finds the active registration for one group at one forge', () => {
+    register();
+    expect(
+      store.findActiveGroupRegistration('chevro-dind', 'gl-chevro')?.id,
+    ).toBe(1);
+    expect(
+      store.findActiveGroupRegistration('chevro-dind', 'gl-other'),
+    ).toBeUndefined();
+    expect(
+      store.findActiveGroupRegistration('other', 'gl-chevro'),
+    ).toBeUndefined();
+  });
+
+  it('lists every active registration and drops the retired ones', () => {
+    const first = register();
+    register('other-group');
+    store.retireGroupRegistration(first.id);
+    expect(store.activeGroupRegistrations().map((row) => row.group)).toEqual([
+      'other-group',
+    ]);
+    expect(
+      store.findActiveGroupRegistration('chevro-dind', 'gl-chevro'),
+    ).toBeUndefined();
+  });
+
+  it('lets a retired group register again, so a lost entity can be replaced', () => {
+    const first = register();
+    store.retireGroupRegistration(first.id);
+    const second = register();
+    expect(second.id).not.toBe(first.id);
+    expect(
+      store.findActiveGroupRegistration('chevro-dind', 'gl-chevro')?.id,
+    ).toBe(second.id);
+  });
+
+  it('refuses two active registrations for the same group and forge', () => {
+    register();
+    expect(() => register()).toThrow();
+  });
+});
+
+describe('StateStore, on disk', () => {
+  let dir: string;
+
+  afterEach(async () => {
+    if (dir !== undefined) {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the state directory and the database to their owner', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'grove-state-'));
+    const path = join(dir, 'nested', 'grove.db');
+    const disk = StateStore.open(path);
+    try {
+      expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    } finally {
+      disk.close();
+    }
+  });
+
+  it('tightens an existing database and directory that were left loose', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'grove-state-'));
+    const nested = join(dir, 'state');
+    mkdirSync(nested);
+    const path = join(nested, 'grove.db');
+    // A milestone 2 database, created before grove set the modes itself.
+    const old = new DatabaseSync(path);
+    old.exec(MIGRATIONS[0]);
+    old.exec('PRAGMA user_version = 1');
+    old.close();
+    chmodSync(nested, 0o755);
+    chmodSync(path, 0o644);
+
+    const disk = StateStore.open(path);
+    try {
+      expect(statSync(nested).mode & 0o777).toBe(0o700);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(disk.schemaVersion()).toBe(SCHEMA_VERSION);
+    } finally {
+      disk.close();
+    }
+  });
+
+  it('migrates a milestone 2 database to version 2 without losing a runner', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'grove-state-'));
+    const path = join(dir, 'grove.db');
+    const old = new DatabaseSync(path);
+    old.exec(MIGRATIONS[0]);
+    old.exec('PRAGMA user_version = 1');
+    old.exec(
+      `INSERT INTO runners
+         (group_name, runner_index, host, forge, name, created_at)
+       VALUES ('overload-arm', 1, 'mac', 'gh-overload', 'grove-overload-arm-1', 1)`,
+    );
+    old.close();
+
+    const migrated = StateStore.open(path);
+    try {
+      expect(migrated.schemaVersion()).toBe(SCHEMA_VERSION);
+      expect(SCHEMA_VERSION).toBe(2);
+      const [record] = migrated.activeRunners();
+      expect(record.name).toBe('grove-overload-arm-1');
+      expect(record.systemId).toBeNull();
+      expect(migrated.activeGroupRegistrations()).toEqual([]);
+    } finally {
+      migrated.close();
+    }
   });
 });

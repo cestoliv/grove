@@ -276,7 +276,7 @@ describe('observeFleet', () => {
     expect(observed.forges[0].runners).toHaveLength(1);
   });
 
-  it('observes no forge for a group grove cannot manage yet', async () => {
+  it('observes no forge for a group whose client was never built', async () => {
     const desired = config({
       forges: { 'gl-chevro': { kind: 'gitlab', url: 'https://git.chevro.fr' } },
       groups: [
@@ -296,5 +296,121 @@ describe('observeFleet', () => {
 
     expect(observed.forges).toEqual([]);
     expect(observed.hosts[0].workRoots).toEqual({});
+  });
+});
+
+describe('observeFleet, a GitLab group', () => {
+  const gitlabConfig = {
+    tick: { fast: 120_000, full: 1_800_000 },
+    hosts: {
+      atlas: { type: 'ssh', host: 'atlas', work_root: '/PROD/local/grove' },
+    },
+    forges: { 'gl-chevro': { kind: 'gitlab', url: 'https://git.chevro.fr' } },
+    groups: [
+      {
+        name: 'chevro-dind',
+        forge: 'gl-chevro',
+        scope: { level: 'instance' },
+        placement: { atlas: 2 },
+        stack: 'docker',
+        tags: ['docker'],
+      },
+    ],
+  } as GroveConfig;
+
+  function atlasTransport(): FakeTransport {
+    return new FakeTransport('atlas')
+      .on('uname', { stdout: 'Linux x86_64\n' })
+      .on('sh -c printf %s "$HOME"', { stdout: '/root' })
+      .on('docker ps', {
+        stdout: `${JSON.stringify({
+          ID: 'a1',
+          Names: 'grove-chevro-dind-1',
+          State: 'running',
+          Image: 'gitlab/gitlab-runner:latest',
+          Status: 'Up 2 hours',
+          CreatedAt: 'now',
+        })}\n`,
+      })
+      .on('sh -c set --', {
+        stdout: 'grove-chevro-dind-1\ts_aaaaaaaaaaaa\n',
+      });
+  }
+
+  it('observes the host and the forge instead of skipping the group', async () => {
+    const client = new FakeForgeClient('gl-chevro', {
+      kind: 'gitlab',
+      sharedRegistration: true,
+    });
+    const observed = await observeFleet(gitlabConfig, {
+      transports: new Map([['atlas', atlasTransport()]]),
+      forgeClients: new Map([['gl-chevro', client]]),
+    });
+
+    expect(observed.forges.map((forge) => forge.forge)).toEqual(['gl-chevro']);
+    expect(observed.forges[0].shared).toBe(true);
+    expect(client.scopesListed).toEqual([{ level: 'instance' }]);
+  });
+
+  it('reads a system id for every GitLab container it saw', async () => {
+    const transport = atlasTransport();
+    const observed = await observeFleet(gitlabConfig, {
+      transports: new Map([['atlas', transport]]),
+      forgeClients: new Map([
+        [
+          'gl-chevro',
+          new FakeForgeClient('gl-chevro', {
+            kind: 'gitlab',
+            sharedRegistration: true,
+          }),
+        ],
+      ]),
+    });
+
+    expect(observed.hosts[0].systemIds).toEqual({
+      'grove-chevro-dind-1': 's_aaaaaaaaaaaa',
+    });
+    const asked = transport.calls.find((call) =>
+      call.args.some((arg) => arg.includes('.runner_system_id')),
+    );
+    expect(asked?.args[1]).toContain(
+      "'/PROD/local/grove/chevro-dind-1-config/.runner_system_id'",
+    );
+  });
+
+  it('asks no host for a system id when every group is a GitHub group', async () => {
+    const transport = new FakeTransport('mac')
+      .on('uname', { stdout: 'Darwin arm64\n' })
+      .on('sh -c printf %s "$HOME"', { stdout: '/Users/olivier' })
+      .on('docker ps', { stdout: '' });
+    const githubConfig = {
+      ...gitlabConfig,
+      hosts: { mac: { type: 'local' } },
+      forges: { 'gh-overload': { kind: 'github' } },
+      groups: [
+        {
+          name: 'overload-arm',
+          forge: 'gh-overload',
+          scope: { level: 'organization', target: 'Overload-coach' },
+          placement: { mac: 1 },
+          stack: 'docker',
+        },
+      ],
+    } as GroveConfig;
+
+    const observed = await observeFleet(githubConfig, {
+      transports: new Map([['mac', transport]]),
+      forgeClients: new Map([
+        ['gh-overload', new FakeForgeClient('gh-overload')],
+      ]),
+    });
+
+    expect(observed.hosts[0].systemIds).toBeUndefined();
+    expect(observed.forges[0].shared).toBe(false);
+    expect(
+      transport.calls.some((call) =>
+        call.args.some((arg) => arg.includes('.runner_system_id')),
+      ),
+    ).toBe(false);
   });
 });

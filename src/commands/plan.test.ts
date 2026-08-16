@@ -87,7 +87,7 @@ describe('runPlan', () => {
     expect(text).toContain('overload-arm');
     expect(text).toContain('chevro-dind');
     expect(text).toContain(
-      '2 change(s) planned. grove plan changes nothing. Run grove apply to make them.',
+      '5 change(s) planned. grove plan changes nothing. Run grove apply to make them.',
     );
   });
 
@@ -105,8 +105,9 @@ describe('runPlan', () => {
       stdout: (text) => out.push(text),
       stderr: () => undefined,
     });
+    // chevro-dind sits on a GitLab forge, where grove supplies the socket.
     expect(out.join('\n')).toContain(
-      'group "chevro-dind" runs privileged and mounts /var/run/docker.sock',
+      'group "chevro-dind" runs privileged job containers, and grove mounts /var/run/docker.sock into the runner',
     );
   });
 
@@ -243,6 +244,6 @@ describe('runPlan', () => {
     const text = out.join('\n');
     expect(text).toContain('Changes');
     expect(text).toContain('create      grove-overload-arm-1');
-    expect(text).toContain('skipped     chevro-dind');
+    expect(text).toContain('create      grove-chevro-dind-1');
   });
 });

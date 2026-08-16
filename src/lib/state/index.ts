@@ -6,7 +6,9 @@ export {
   type StateDirOptions,
 } from './paths.js';
 export {
+  type CreateGroupRegistrationInput,
   type CreateRunnerInput,
+  type GroupRegistrationRecord,
   type LivenessSample,
   type LivenessState,
   type RunnerEvent,

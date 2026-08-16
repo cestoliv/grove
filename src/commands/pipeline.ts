@@ -9,6 +9,7 @@ import {
   hasDestructive,
   type ObservedState,
   observeFleet,
+  persistSystemIds,
   reconcile,
 } from '../lib/reconcile/index.js';
 import {
@@ -21,6 +22,9 @@ import {
 export interface PipelineOptions extends OpenFleetOptions {
   openFleet?: OpenFleet;
   probeTimeoutMs?: number;
+  // An acting command sets this. `plan` never does, because `plan` writes
+  // nothing to the database.
+  recordSystemIds?: boolean;
 }
 
 export interface PlannedFleet {
@@ -61,10 +65,16 @@ export async function planFleet(
       ? {}
       : { probeTimeoutMs: options.probeTimeoutMs }),
   });
+  if (options.recordSystemIds === true) {
+    // Before the records are read below, so a manager grove just learned
+    // about shows up in this pass rather than the next one.
+    persistSystemIds(observed, fleet.store.activeRunners(), fleet.store);
+  }
   const actions = reconcile(
     fleet.loaded.config,
     observed,
     fleet.store.activeRunners(),
+    { registrations: fleet.store.activeGroupRegistrations() },
   );
   const report = buildPlanReport(fleet.loaded, {
     observed,

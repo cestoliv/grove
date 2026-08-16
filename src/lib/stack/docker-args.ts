@@ -1,21 +1,17 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
-import { ConfigError } from '../config/errors.js';
-import type {
-  ConfigWarning,
-  GroupConfig,
-  GroveConfig,
-  HostConfig,
-} from '../config/index.js';
+import type { GroupConfig, HostConfig } from '../config/index.js';
 import type { RunnerRegistration } from '../forge/index.js';
 import {
   resolveCacheRoot,
   resolveWorkRoot,
+  runnerConfigDir,
   runnerDir,
   runnerName,
 } from '../naming.js';
 import { expandHome } from '../paths.js';
 import { shellQuote } from '../transport/index.js';
+import { envMap, stringList } from './raw-shared.js';
 
 // GitHub's own image for self-hosted Actions runners. Multi-architecture, no
 // ENTRYPOINT, and config.sh and run.sh sit in the working directory.
@@ -33,6 +29,10 @@ export interface RunnerSpec {
   // resolves every path a job builds against the host, never the container.
   workDir: string;
   cacheDir: string;
+  // Where a runner keeps state that is not build output. The GitLab stack
+  // mounts it at /etc/gitlab-runner, the GitHub stack derives it and does
+  // not use it, so one derivation covers both.
+  configDir: string;
   registrationUrl: string;
   registrationToken: string;
   labels: string[];
@@ -46,7 +46,7 @@ export interface RunnerSpec {
 
 export type RunnerDirs = Pick<
   RunnerSpec,
-  'name' | 'group' | 'index' | 'workDir' | 'cacheDir'
+  'name' | 'group' | 'index' | 'workDir' | 'cacheDir' | 'configDir'
 >;
 
 export interface RunnerSpecInput {
@@ -72,75 +72,17 @@ export function rawDockerOptions(
 
   for (const [key, value] of Object.entries(raw ?? {})) {
     if (key === 'docker_run_args') {
-      if (
-        !Array.isArray(value) ||
-        value.some((entry) => typeof entry !== 'string')
-      ) {
-        throw new Error('raw.docker_run_args must be a list of strings');
-      }
-      runArgs.push(...(value as string[]));
+      runArgs.push(...stringList(key, value));
       continue;
     }
     if (key === 'env') {
-      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('raw.env must be a mapping of names to values');
-      }
-      for (const [name, entry] of Object.entries(
-        value as Record<string, unknown>,
-      )) {
-        if (
-          typeof entry !== 'string' &&
-          typeof entry !== 'number' &&
-          typeof entry !== 'boolean'
-        ) {
-          throw new Error(
-            `raw.env.${name} must be a string, number or boolean`,
-          );
-        }
-        env[name] = String(entry);
-      }
+      Object.assign(env, envMap(key, value));
       continue;
     }
     unknownKeys.push(key);
   }
 
   return { env, runArgs, unknownKeys };
-}
-
-// The key whose value made a raw block malformed, read back out of
-// rawDockerOptions' own error message, so a config typo turns into a
-// ConfigError instead of an uncaught throw from inside `plan`.
-function rawKeyFromError(message: string): string | undefined {
-  return /^raw\.([^.\s]+)/.exec(message)?.[1];
-}
-
-export function rawDockerWarnings(config: GroveConfig): ConfigWarning[] {
-  const warnings: ConfigWarning[] = [];
-  for (const [index, group] of config.groups.entries()) {
-    if (group.stack !== 'docker' || group.raw === undefined) {
-      continue;
-    }
-    let options: RawDockerOptions;
-    try {
-      options = rawDockerOptions(group.raw);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const key = rawKeyFromError(message);
-      const path =
-        key === undefined
-          ? `groups[${index}].raw`
-          : `groups[${index}].raw.${key}`;
-      throw new ConfigError([{ path, message }]);
-    }
-    for (const key of options.unknownKeys) {
-      warnings.push({
-        code: 'raw-unused',
-        path: `groups[${index}].raw.${key}`,
-        message: `the Docker stack reads ${RAW_DOCKER_KEYS.join(' and ')} from raw, and passes nothing else through. grove proceeds anyway.`,
-      });
-    }
-  }
-  return warnings;
 }
 
 // Stable per group and Dockerfile path. A Dockerfile that changes in place
@@ -185,6 +127,7 @@ export function buildRunnerDirs(
     index,
     workDir: runnerDir(workRoot, group.name, index),
     cacheDir: runnerDir(cacheRoot, group.name, index),
+    configDir: runnerConfigDir(workRoot, group.name, index),
   };
 }
 

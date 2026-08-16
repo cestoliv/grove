@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { migrate } from './migrations.js';
@@ -20,6 +20,9 @@ export interface RunnerRecord {
   host: string;
   forge: string;
   forgeRunnerId: string | null;
+  // Learned from the host once the container has started once. Null until
+  // then, and null for every stack that has no manager concept.
+  systemId: string | null;
   name: string;
   createdAt: number;
   retiredAt: number | null;
@@ -47,6 +50,25 @@ export interface CreateRunnerInput {
   forgeRunnerId?: string | null;
 }
 
+export interface GroupRegistrationRecord {
+  id: number;
+  group: string;
+  forge: string;
+  forgeRunnerId: string;
+  url: string;
+  token: string;
+  createdAt: number;
+  retiredAt: number | null;
+}
+
+export interface CreateGroupRegistrationInput {
+  group: string;
+  forge: string;
+  forgeRunnerId: string;
+  url: string;
+  token: string;
+}
+
 export interface StateStoreOptions {
   now?: () => number;
 }
@@ -65,10 +87,36 @@ function toRecord(row: Row): RunnerRecord {
     host: String(row.host),
     forge: String(row.forge),
     forgeRunnerId: text(row.forge_runner_id),
+    systemId: text(row.system_id),
     name: String(row.name),
     createdAt: Number(row.created_at),
     retiredAt: row.retired_at === null ? null : Number(row.retired_at),
   };
+}
+
+function toRegistration(row: Row): GroupRegistrationRecord {
+  return {
+    id: Number(row.id),
+    group: String(row.group_name),
+    forge: String(row.forge),
+    forgeRunnerId: String(row.forge_runner_id),
+    url: String(row.url),
+    token: String(row.token),
+    createdAt: Number(row.created_at),
+    retiredAt: row.retired_at === null ? null : Number(row.retired_at),
+  };
+}
+
+// The database holds a GitLab runner authentication token, so it is no more
+// readable than an SSH private key. The directory mode is the durable part,
+// because SQLite recreates the -wal and -shm files as it pleases.
+function restrict(path: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(dirname(path), 0o700);
+  } catch {
+    // A directory somebody else owns keeps its own mode, and grove still runs.
+  }
 }
 
 export class StateStore {
@@ -82,9 +130,16 @@ export class StateStore {
 
   static open(path: string, options: StateStoreOptions = {}): StateStore {
     if (path !== ':memory:') {
-      mkdirSync(dirname(path), { recursive: true });
+      restrict(path);
     }
     const db = new DatabaseSync(path);
+    if (path !== ':memory:') {
+      try {
+        chmodSync(path, 0o600);
+      } catch {
+        // Same reason as the directory above.
+      }
+    }
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA foreign_keys = ON');
     migrate(db);
@@ -150,10 +205,75 @@ export class StateStore {
       .run(forgeRunnerId, id);
   }
 
+  setSystemId(id: number, systemId: string): void {
+    this.db
+      .prepare('UPDATE runners SET system_id = ? WHERE id = ?')
+      .run(systemId, id);
+  }
+
   retireRunner(id: number): void {
     this.db
       .prepare(
         'UPDATE runners SET retired_at = ? WHERE id = ? AND retired_at IS NULL',
+      )
+      .run(this.now(), id);
+  }
+
+  createGroupRegistration(
+    input: CreateGroupRegistrationInput,
+  ): GroupRegistrationRecord {
+    const result = this.db
+      .prepare(
+        `INSERT INTO group_registrations
+           (group_name, forge, forge_runner_id, url, token, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.group,
+        input.forge,
+        input.forgeRunnerId,
+        input.url,
+        input.token,
+        this.now(),
+      );
+    const row = this.db
+      .prepare('SELECT * FROM group_registrations WHERE id = ?')
+      .get(Number(result.lastInsertRowid)) as Row | undefined;
+    if (row === undefined) {
+      throw new Error(
+        `grove.db lost the registration it just wrote for ${input.group}`,
+      );
+    }
+    return toRegistration(row);
+  }
+
+  findActiveGroupRegistration(
+    group: string,
+    forge: string,
+  ): GroupRegistrationRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM group_registrations
+         WHERE group_name = ? AND forge = ? AND retired_at IS NULL`,
+      )
+      .get(group, forge) as Row | undefined;
+    return row === undefined ? undefined : toRegistration(row);
+  }
+
+  activeGroupRegistrations(): GroupRegistrationRecord[] {
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM group_registrations WHERE retired_at IS NULL ORDER BY id',
+      )
+      .all() as Row[];
+    return rows.map(toRegistration);
+  }
+
+  retireGroupRegistration(id: number): void {
+    this.db
+      .prepare(
+        `UPDATE group_registrations SET retired_at = ?
+         WHERE id = ? AND retired_at IS NULL`,
       )
       .run(this.now(), id);
   }

@@ -80,3 +80,71 @@ describe('isReport', () => {
     ).toBe(true);
   });
 });
+
+describe('delete-shared-runner', () => {
+  const action: Action = {
+    kind: 'delete-shared-runner',
+    host: 'atlas',
+    forge: 'gl-chevro',
+    scope: { level: 'instance' },
+    group: 'chevro-dind',
+    name: 'grove-chevro-dind',
+    forgeRunnerId: '48',
+    registrationId: 7,
+    destructive: true,
+  };
+
+  it('describes the entity, the forge and why it goes', () => {
+    expect(describeAction(action)).toBe(
+      'delete      grove-chevro-dind  ' +
+        'runner entity 48 at gl-chevro, its last manager is gone',
+    );
+  });
+
+  it('counts as destructive, so apply asks first', () => {
+    expect(hasDestructive([action])).toBe(true);
+  });
+
+  it('is not a report, so the executor runs it', () => {
+    expect(isReport(action)).toBe(false);
+  });
+
+  it('never carries a token, so no log line can leak one', () => {
+    expect(Object.keys(action)).not.toContain('token');
+    expect(describeAction(action)).not.toContain('glrt');
+  });
+});
+
+describe('create-runner with a renewed registration', () => {
+  const renewing: Action = {
+    kind: 'create-runner',
+    host: 'atlas',
+    forge: 'gl-chevro',
+    group: 'chevro-dind',
+    index: 1,
+    name: 'grove-chevro-dind-1',
+    renewRegistration: '48',
+    destructive: true,
+  };
+
+  it('says the stored registration is about to go', () => {
+    expect(describeAction(renewing)).toBe(
+      'create      grove-chevro-dind-1  on atlas, registering at gl-chevro, ' +
+        'renewing the group registration',
+    );
+  });
+
+  it('counts as destructive, so apply asks first', () => {
+    expect(hasDestructive([renewing])).toBe(true);
+  });
+
+  it('carries the id the planner judged gone, never a token', () => {
+    expect(renewing).toMatchObject({ renewRegistration: '48' });
+    expect(describeAction(renewing)).not.toContain('glrt');
+  });
+
+  it('leaves a plain create alone', () => {
+    expect(describeAction(create)).not.toContain('renewing');
+    expect(hasDestructive([create])).toBe(false);
+  });
+});
