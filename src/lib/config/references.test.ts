@@ -133,3 +133,36 @@ describe('validateReferences', () => {
     expect(issues).toHaveLength(2);
   });
 });
+
+describe('validateReferences, GitLab group names', () => {
+  it('refuses a GitLab group whose name ends in a dash and digits', () => {
+    const issues = validateReferences(
+      buildConfig({
+        name: 'chevro-2',
+        forge: 'gl-chevro',
+        scope: { level: 'instance' },
+      }),
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0].path).toBe('groups[0].name');
+    expect(issues[0].message).toContain(
+      'one runner entity described as "grove-chevro-2"',
+    );
+  });
+
+  it('accepts the same name on a GitHub forge', () => {
+    expect(validateReferences(buildConfig({ name: 'chevro-2' }))).toEqual([]);
+  });
+
+  it('accepts a GitLab group whose name ends in a letter', () => {
+    expect(
+      validateReferences(
+        buildConfig({
+          name: 'chevro-dind',
+          forge: 'gl-chevro',
+          scope: { level: 'instance' },
+        }),
+      ),
+    ).toEqual([]);
+  });
+});

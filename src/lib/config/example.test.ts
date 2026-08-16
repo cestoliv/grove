@@ -55,6 +55,14 @@ describe('grove.example.yaml', () => {
     });
   });
 
+  it('shows the gitlab job image the README documents', async () => {
+    const loaded = await loadConfig({
+      path: EXAMPLE_PATH,
+      env: { GH_TOKEN: 'example-token' },
+    });
+    expect(loaded.config.groups[1].raw).toEqual({ job_image: 'docker:27' });
+  });
+
   it('uses environment interpolation rather than a literal token', async () => {
     await expect(loadConfig({ path: EXAMPLE_PATH, env: {} })).rejects.toThrow(
       /environment variable GH_TOKEN is not set/,

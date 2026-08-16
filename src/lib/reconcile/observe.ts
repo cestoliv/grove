@@ -1,11 +1,13 @@
 import type { GroupConfig, GroveConfig, Scope } from '../config/index.js';
 import { errorMessage } from '../errors.js';
 import type { ForgeClient } from '../forge/index.js';
+import { parseManagedName } from '../naming.js';
 import {
   buildRunnerDirs,
   checkWorkRootVolume,
   type DockerContainer,
   DockerStack,
+  type SystemIdTarget,
   type VolumeCheck,
 } from '../stack/index.js';
 import { probeHost, type Transport } from '../transport/index.js';
@@ -38,17 +40,15 @@ function scopeKey(scope: Scope): string {
   return 'target' in scope ? `${scope.level}:${scope.target}` : scope.level;
 }
 
-// Groups grove can act on today: Docker stack, GitHub forge, and a forge
-// client was built for them.
+// Groups grove can act on today: Docker stack, and a forge client was built
+// for their forge. A group whose client is missing is silently absent from
+// this list, which is what keeps `logs` working with no token at all.
 function manageableGroups(
   config: GroveConfig,
   forgeClients: ReadonlyMap<string, ForgeClient>,
 ): GroupConfig[] {
   return config.groups.filter(
-    (group) =>
-      group.stack === 'docker' &&
-      config.forges[group.forge]?.kind === 'github' &&
-      forgeClients.has(group.forge),
+    (group) => group.stack === 'docker' && forgeClients.has(group.forge),
   );
 }
 
@@ -94,6 +94,32 @@ async function observeHost(
       );
     }
 
+    // gitlab-runner writes .runner_system_id next to config.toml at first
+    // start, and the managers endpoint has no field that names a container,
+    // so this file is the only thing that maps one to the other.
+    const gitlabGroups = new Map(
+      groups
+        .filter((group) => config.forges[group.forge]?.kind === 'gitlab')
+        .map((group) => [group.name, group] as const),
+    );
+    const targets: SystemIdTarget[] = [];
+    for (const container of containers) {
+      const parsed = parseManagedName(container.name);
+      const group =
+        parsed === null ? undefined : gitlabGroups.get(parsed.group);
+      if (parsed === null || group === undefined) {
+        continue;
+      }
+      const dirs = buildRunnerDirs({
+        group,
+        host: config.hosts[name],
+        index: parsed.index,
+        home,
+      });
+      targets.push({ name: container.name, configDir: dirs.configDir });
+    }
+    const systemIds = await stack.readSystemIds(targets);
+
     return {
       host: name,
       reachable: true,
@@ -102,6 +128,7 @@ async function observeHost(
       ...(home === undefined ? {} : { home }),
       containers,
       workRoots,
+      ...(Object.keys(systemIds).length === 0 ? {} : { systemIds }),
     };
   } catch (error) {
     return unreachable(name, errorMessage(error));
@@ -130,11 +157,17 @@ async function observeForge(
     return {
       forge: name,
       reachable: false,
+      shared: client.sharedRegistration,
       reason: errorMessage(error),
       runners: [],
     };
   }
-  return { forge: name, reachable: true, runners };
+  return {
+    forge: name,
+    reachable: true,
+    shared: client.sharedRegistration,
+    runners,
+  };
 }
 
 export async function observeFleet(

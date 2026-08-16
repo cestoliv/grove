@@ -1,11 +1,29 @@
 import type { ForgeKind, Scope } from '../config/index.js';
 
+// One running gitlab-runner process attached to a runner entity. The managers
+// endpoint exposes no name, so `systemId` is the only field that tells two
+// managers of the same entity apart.
+export interface ForgeRunnerManager {
+  systemId: string;
+  // GitLab answers online, offline, stale or never_contacted. The raw string
+  // travels, because "stale" and "offline" mean different things to a reader.
+  status: string;
+  busy: boolean;
+  contactedAt?: string;
+  version?: string;
+  ipAddress?: string;
+}
+
 export interface ForgeRunner {
   id: string;
   name: string;
   status: 'online' | 'offline';
   busy: boolean;
+  // GitHub labels and GitLab tags both land here, because both answer the
+  // same question about one runner: which jobs may it take.
   labels: string[];
+  // Set by a forge that runs one entity with many managers, absent otherwise.
+  managers?: ForgeRunnerManager[];
 }
 
 // What the runner process needs in order to register itself. GitHub mints a
@@ -21,8 +39,12 @@ export interface RunnerRegistration {
 export interface RegistrationRequest {
   scope: Scope;
   group: string;
+  // The runner name for a per-runner forge, and the entity description for a
+  // forge with one entity per group.
   name: string;
   labels: string[];
+  // GitLab tags belong to the entity and are set once, at creation.
+  tags?: string[];
 }
 
 export interface ForgeClient {

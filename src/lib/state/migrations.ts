@@ -52,19 +52,64 @@ export const MIGRATIONS: string[] = [
 
   CREATE INDEX jobs_runner ON jobs (runner_id, started_at);
   `,
+  `
+  -- GitLab hands back the glrt- authentication token once and never again,
+  -- and every later manager in the group registers against that same token.
+  -- It is the one piece of state grove cannot derive from the host or the
+  -- forge, which is why it is stored rather than observed.
+  CREATE TABLE group_registrations (
+    id INTEGER PRIMARY KEY,
+    group_name TEXT NOT NULL,
+    forge TEXT NOT NULL,
+    forge_runner_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    token TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    retired_at INTEGER
+  ) STRICT;
+
+  CREATE UNIQUE INDEX group_registrations_active
+    ON group_registrations (group_name, forge) WHERE retired_at IS NULL;
+
+  -- gitlab-runner generates this at first start and writes it next to
+  -- config.toml. It is the only field that tells one manager of an entity
+  -- from another, because the managers endpoint exposes no name.
+  ALTER TABLE runners ADD COLUMN system_id TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
-export function migrate(db: DatabaseSync): number {
+// `migrations` is a seam for tests. Production always migrates MIGRATIONS.
+export function migrate(
+  db: DatabaseSync,
+  migrations: readonly string[] = MIGRATIONS,
+): number {
   const row = db.prepare('PRAGMA user_version').get() as
     | { user_version: number }
     | undefined;
   let version = Number(row?.user_version ?? 0);
-  while (version < MIGRATIONS.length) {
-    db.exec(MIGRATIONS[version]);
-    version += 1;
-    db.exec(`PRAGMA user_version = ${version}`);
+  while (version < migrations.length) {
+    const next = version + 1;
+    // The statements and the version bump land together or not at all. A
+    // half applied migration would leave every later open dying on a table
+    // that already exists, and the database holds a token grove cannot
+    // fetch again.
+    db.exec('BEGIN');
+    try {
+      db.exec(migrations[version]);
+      db.exec(`PRAGMA user_version = ${next}`);
+      db.exec('COMMIT');
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // The transaction is already gone, which is the state the rollback
+        // was asking for. The migration error is the one that travels.
+      }
+      throw error;
+    }
+    version = next;
   }
   return version;
 }

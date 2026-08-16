@@ -74,7 +74,7 @@ describe('openFleet', () => {
     expect(transports.atlas.closed).toBe(true);
   });
 
-  it('builds a client for a GitHub forge and none for a GitLab forge', async () => {
+  it('builds a client for every Docker group forge, GitLab included', async () => {
     const path = await write();
     const transports = fakeTransports();
     const built: string[] = [];
@@ -90,8 +90,31 @@ describe('openFleet', () => {
       },
     });
 
-    expect(built).toEqual(['gh-overload']);
-    expect([...fleet.forgeClients.keys()]).toEqual(['gh-overload']);
+    expect(built.sort()).toEqual(['gh-overload', 'gl-chevro']);
+    expect([...fleet.forgeClients.keys()].sort()).toEqual([
+      'gh-overload',
+      'gl-chevro',
+    ]);
+    await fleet.close();
+  });
+
+  it('picks the client class from the forge kind', async () => {
+    const path = await write();
+    const transports = fakeTransports();
+    const fleet = await openFleet({
+      config: path,
+      env: {},
+      store,
+      connect: (name) => transports[name],
+      resolveToken: async () => ['glpat', 'A1b2C3d4E5f6G7h8I9j0'].join('-'),
+    });
+
+    expect(fleet.forgeClients.get('gh-overload')?.kind).toBe('github');
+    expect(fleet.forgeClients.get('gh-overload')?.sharedRegistration).toBe(
+      false,
+    );
+    expect(fleet.forgeClients.get('gl-chevro')?.kind).toBe('gitlab');
+    expect(fleet.forgeClients.get('gl-chevro')?.sharedRegistration).toBe(true);
     await fleet.close();
   });
 
@@ -111,7 +134,7 @@ describe('openFleet', () => {
       createForgeClient: (name) => new FakeForgeClient(name),
     });
 
-    expect(seen).toEqual(['mac']);
+    expect(seen).toEqual(['mac', 'mac']);
     await fleet.close();
   });
 

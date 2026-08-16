@@ -5,10 +5,13 @@ import {
   DEFAULT_WORK_ROOT,
   isManagedName,
   parseManagedName,
+  parseSharedName,
   resolveCacheRoot,
   resolveWorkRoot,
+  runnerConfigDir,
   runnerDir,
   runnerName,
+  sharedRunnerName,
 } from './naming.js';
 
 const host = { type: 'local' } as HostConfig;
@@ -106,5 +109,45 @@ describe('resolveCacheRoot', () => {
     expect(
       resolveCacheRoot({ ...host, cache_root: '/host-cache' }, group),
     ).toBe('/host-cache');
+  });
+});
+
+describe('sharedRunnerName and parseSharedName', () => {
+  it('describes the whole group, with no index', () => {
+    expect(sharedRunnerName('chevro-dind')).toBe('grove-chevro-dind');
+  });
+
+  it('reads its own description back', () => {
+    expect(parseSharedName('grove-chevro-dind')).toEqual({
+      group: 'chevro-dind',
+    });
+  });
+
+  it('refuses a seat name, which would be ambiguous', () => {
+    expect(parseSharedName('grove-chevro-dind-1')).toBeNull();
+  });
+
+  it('refuses a name that is not grove shaped', () => {
+    expect(parseSharedName('gitlab-runner')).toBeNull();
+    expect(parseSharedName('grove-')).toBeNull();
+    expect(parseSharedName('grove-Chevro')).toBeNull();
+  });
+
+  it('refuses a group name longer than the cap', () => {
+    expect(parseSharedName(`grove-${'a'.repeat(41)}`)).toBeNull();
+  });
+});
+
+describe('runnerConfigDir', () => {
+  it('sits beside the work dir and names itself', () => {
+    expect(runnerConfigDir('/Volumes/ci/grove', 'chevro-dind', 3)).toBe(
+      '/Volumes/ci/grove/chevro-dind-3-config',
+    );
+  });
+
+  it('drops a trailing slash on the root', () => {
+    expect(runnerConfigDir('/PROD/local/grove/', 'chevro-dind', 1)).toBe(
+      '/PROD/local/grove/chevro-dind-1-config',
+    );
   });
 });

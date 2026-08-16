@@ -64,3 +64,106 @@ describe('FakeForgeClient', () => {
     ).toBe(true);
   });
 });
+
+describe('FakeForgeClient, shared registration', () => {
+  const gitlabScope: Scope = { level: 'instance' };
+
+  function shared(): FakeForgeClient {
+    return new FakeForgeClient('gl-chevro', {
+      kind: 'gitlab',
+      sharedRegistration: true,
+    });
+  }
+
+  it('mints a new entity on every call, exactly as GitLab does', async () => {
+    const client = shared();
+    const first = await client.createRegistration({
+      scope: gitlabScope,
+      group: 'chevro-dind',
+      name: 'grove-chevro-dind',
+      labels: [],
+      tags: ['docker', 'dind'],
+    });
+    const second = await client.createRegistration({
+      scope: gitlabScope,
+      group: 'chevro-dind',
+      name: 'grove-chevro-dind',
+      labels: [],
+      tags: ['docker', 'dind'],
+    });
+
+    // Avoiding the second call is grove's job, not the forge's. The store
+    // holds the token, and the executor is what reuses it.
+    expect(first.runnerId).toBe('101');
+    expect(second.runnerId).toBe('102');
+    expect(second.token).not.toBe(first.token);
+    expect(await client.listRunners(gitlabScope)).toHaveLength(2);
+  });
+
+  it('lists the minted entity with its tags and no manager yet', async () => {
+    const client = shared();
+    const registration = await client.createRegistration({
+      scope: gitlabScope,
+      group: 'chevro-dind',
+      name: 'grove-chevro-dind',
+      labels: [],
+      tags: ['docker', 'dind'],
+    });
+
+    expect(await client.listRunners(gitlabScope)).toEqual([
+      {
+        id: registration.runnerId,
+        name: 'grove-chevro-dind',
+        status: 'online',
+        busy: false,
+        labels: ['docker', 'dind'],
+        managers: [],
+      },
+    ]);
+  });
+
+  it('adds a manager to an entity, with a system id and a status', async () => {
+    const client = shared();
+    const registration = await client.createRegistration({
+      scope: gitlabScope,
+      group: 'chevro-dind',
+      name: 'grove-chevro-dind',
+      labels: [],
+      tags: [],
+    });
+    client.addManager(registration.runnerId as string, {
+      systemId: 's_aaaaaaaaaaaa',
+      contactedAt: '2026-08-16T10:00:00Z',
+    });
+    client.addManager(registration.runnerId as string, {
+      systemId: 'r_bbbbbbbbbbbb',
+      status: 'stale',
+      busy: false,
+    });
+
+    const [entity] = await client.listRunners(gitlabScope);
+    expect(entity.managers).toEqual([
+      {
+        systemId: 's_aaaaaaaaaaaa',
+        status: 'online',
+        busy: false,
+        contactedAt: '2026-08-16T10:00:00Z',
+      },
+      { systemId: 'r_bbbbbbbbbbbb', status: 'stale', busy: false },
+    ]);
+  });
+
+  it('refuses a manager on an entity it never minted', () => {
+    expect(() => shared().addManager('999', { systemId: 's_x' })).toThrow(
+      'no runner 999',
+    );
+  });
+
+  it('keeps a per-runner client free of managers, as GitHub is', async () => {
+    const client = new FakeForgeClient('gh-overload').addRunner({
+      name: 'grove-overload-arm-1',
+    });
+    const [runner] = await client.listRunners(scope);
+    expect(runner.managers).toBeUndefined();
+  });
+});

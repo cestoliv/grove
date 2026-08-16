@@ -6,6 +6,11 @@ import {
   type RunnerSpec,
 } from './docker-args.js';
 import { PS_ARGS, parsePsOutput } from './docker-ps.js';
+import {
+  buildGitlabRunArgs,
+  type GitlabRunnerSpec,
+  gitlabSystemIdPath,
+} from './gitlab-args.js';
 import { type DockerContainer, StackError } from './types.js';
 
 export const DEFAULT_DRAIN_TIMEOUT_MS = 120_000;
@@ -28,6 +33,20 @@ function assertRunnerDir(dirs: RunnerDirs): void {
       `refusing to wipe ${dirs.workDir}: it is not the work directory of ${dirs.name}`,
     );
   }
+}
+
+function assertConfigDir(dirs: RunnerDirs): void {
+  const suffix = `/${dirs.group}-${dirs.index}-config`;
+  if (!dirs.configDir.startsWith('/') || !dirs.configDir.endsWith(suffix)) {
+    throw new Error(
+      `refusing to wipe ${dirs.configDir}: it is not the config directory of ${dirs.name}`,
+    );
+  }
+}
+
+export interface SystemIdTarget {
+  name: string;
+  configDir: string;
 }
 
 export class DockerStack {
@@ -94,6 +113,78 @@ export class DockerStack {
       `docker run ${spec.name}`,
     );
     return stdout.trim();
+  }
+
+  // config.toml lands here after registration and it carries the runner
+  // authentication token, so nobody but the owner reads this directory.
+  async prepareConfigDir(
+    dirs: RunnerDirs,
+    options: { wipe: boolean },
+  ): Promise<void> {
+    if (options.wipe) {
+      assertConfigDir(dirs);
+    }
+    const config = shellQuote(dirs.configDir);
+    const steps = [
+      ...(options.wipe ? [`rm -rf ${config}`] : []),
+      `mkdir -p ${config}`,
+      `chmod 0700 ${config}`,
+    ];
+    const result = await this.transport.exec('sh', ['-c', steps.join(' && ')]);
+    if (result.code !== 0) {
+      throw new StackError(
+        `${this.host}: cannot prepare ${dirs.configDir}: ${firstLine(result.stderr) || `exit ${result.code}`}`,
+        this.host,
+      );
+    }
+  }
+
+  async createGitlabRunner(spec: GitlabRunnerSpec): Promise<string> {
+    const { stdout } = await this.docker(
+      buildGitlabRunArgs(spec),
+      `docker run ${spec.name}`,
+    );
+    return stdout.trim();
+  }
+
+  // One exec for the whole host. gitlab-runner writes the file at first
+  // start, so a container that has never run answers with nothing and the
+  // next pass picks it up.
+  async readSystemIds(
+    targets: SystemIdTarget[],
+  ): Promise<Record<string, string>> {
+    if (targets.length === 0) {
+      return {};
+    }
+    const positional = targets
+      .flatMap((target) => [
+        shellQuote(target.name),
+        shellQuote(gitlabSystemIdPath(target.configDir)),
+      ])
+      .join(' ');
+    const script = [
+      `set -- ${positional}`,
+      'while [ "$#" -gt 0 ]; do',
+      `  if [ -r "$2" ]; then printf '%s\\t%s\\n' "$1" "$(cat "$2")"; fi`,
+      '  shift 2',
+      'done',
+    ].join('\n');
+
+    const result = await this.transport.exec('sh', ['-c', script]);
+    if (result.code !== 0) {
+      // A system id is a monitoring detail, never a decision input, so a
+      // host that cannot answer keeps every other observation it gave.
+      return {};
+    }
+
+    const ids: Record<string, string> = {};
+    for (const line of result.stdout.split('\n')) {
+      const [name, id] = line.split('\t');
+      if (name !== undefined && id !== undefined && id.trim() !== '') {
+        ids[name] = id.trim();
+      }
+    }
+    return ids;
   }
 
   async start(name: string): Promise<void> {

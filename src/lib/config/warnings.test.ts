@@ -6,7 +6,10 @@ function buildConfig(...groups: Partial<GroupConfig>[]): GroveConfig {
   return {
     tick: { fast: 120_000, full: 1_800_000 },
     hosts: { mac: { type: 'local' }, atlas: { type: 'ssh', host: 'atlas' } },
-    forges: { gh: { kind: 'github' } },
+    forges: {
+      gh: { kind: 'github' },
+      gl: { kind: 'gitlab', url: 'https://git.chevro.fr' },
+    },
     groups: groups.map(
       (group, index) =>
         ({
@@ -64,6 +67,45 @@ describe('privilegedSocketWarnings', () => {
       }),
     );
     expect(warnings).toHaveLength(1);
+  });
+
+  it('warns for a privileged gitlab group that lists no socket', () => {
+    const warnings = privilegedSocketWarnings(
+      buildConfig({
+        name: 'chevro-dind',
+        forge: 'gl',
+        scope: { level: 'instance' },
+        privileged: true,
+      }),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].code).toBe('privileged-docker-socket');
+    expect(warnings[0].path).toBe('groups[0]');
+    expect(warnings[0].message).toBe(
+      'group "chevro-dind" runs privileged job containers, and grove mounts /var/run/docker.sock into the runner. Any job on that runner can take root on the host. grove proceeds anyway.',
+    );
+  });
+
+  it('warns once for a privileged gitlab group that also lists the socket', () => {
+    const warnings = privilegedSocketWarnings(
+      buildConfig({
+        name: 'chevro-dind',
+        forge: 'gl',
+        scope: { level: 'instance' },
+        privileged: true,
+        volumes: ['/var/run/docker.sock:/var/run/docker.sock'],
+      }),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].message).toContain('grove mounts');
+  });
+
+  it('stays quiet for a gitlab group that is not privileged', () => {
+    expect(
+      privilegedSocketWarnings(
+        buildConfig({ forge: 'gl', scope: { level: 'instance' } }),
+      ),
+    ).toEqual([]);
   });
 
   it('warns once per offending group', () => {

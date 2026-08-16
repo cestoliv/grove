@@ -3,7 +3,7 @@ import type { GroveConfig } from '../config/index.js';
 import type { DockerContainer } from '../stack/index.js';
 import type { RunnerRecord } from '../state/index.js';
 import type { Action } from './actions.js';
-import type { ObservedState } from './observed.js';
+import type { ForgeObservation, ObservedState } from './observed.js';
 import { planTeardown } from './teardown.js';
 
 const SCOPE = { level: 'organization', target: 'Overload-coach' } as const;
@@ -45,6 +45,7 @@ function record(name: string, id = 1): RunnerRecord {
     host: 'mac',
     forge: 'gh-overload',
     forgeRunnerId: null,
+    systemId: null,
     name,
     createdAt: 0,
     retiredAt: null,
@@ -446,5 +447,322 @@ describe('planTeardown, a name that collides across hosts and forges', () => {
       forge: 'gh-b',
       forgeRunnerId: '999',
     });
+  });
+});
+
+describe('planTeardown, a GitLab group', () => {
+  const GITLAB_SCOPE = { level: 'instance' } as const;
+
+  function gitlabConfig(): GroveConfig {
+    return {
+      tick: { fast: 120_000, full: 1_800_000 },
+      hosts: { atlas: { type: 'ssh', host: 'atlas' } },
+      forges: { 'gl-chevro': { kind: 'gitlab', url: 'https://git.chevro.fr' } },
+      groups: [
+        {
+          name: 'chevro-dind',
+          forge: 'gl-chevro',
+          scope: GITLAB_SCOPE,
+          placement: { atlas: 2 },
+          stack: 'docker',
+        },
+      ],
+    } as GroveConfig;
+  }
+
+  function gitlabRecord(
+    index: number,
+    systemId: string | null = null,
+  ): RunnerRecord {
+    return {
+      id: index,
+      group: 'chevro-dind',
+      index,
+      host: 'atlas',
+      forge: 'gl-chevro',
+      forgeRunnerId: '48',
+      systemId,
+      name: `grove-chevro-dind-${index}`,
+      createdAt: 0,
+      retiredAt: null,
+    };
+  }
+
+  function gitlabContainer(name: string): DockerContainer {
+    return {
+      name,
+      containerId: name,
+      state: 'running',
+      image: 'gitlab/gitlab-runner:latest',
+      status: 'Up 3 hours',
+      createdAt: 'now',
+    };
+  }
+
+  function entityForge(
+    managers: Array<{ systemId: string; status: string; busy: boolean }> = [],
+  ): ForgeObservation {
+    return {
+      forge: 'gl-chevro',
+      reachable: true,
+      shared: true,
+      runners: [
+        {
+          runner: {
+            id: '48',
+            name: 'grove-chevro-dind',
+            status: 'online',
+            busy: false,
+            labels: ['docker'],
+            managers,
+          },
+          scope: GITLAB_SCOPE,
+        },
+      ],
+    };
+  }
+
+  const registration = {
+    id: 7,
+    group: 'chevro-dind',
+    forge: 'gl-chevro',
+    forgeRunnerId: '48',
+    url: 'https://git.chevro.fr',
+    token: ['glrt', 'K1l2M3n4O5p6Q7r8S9t0'].join('-'),
+    createdAt: 1,
+    retiredAt: null,
+  };
+
+  it('stops every container, then deletes the one entity, last', () => {
+    const actions = planTeardown(
+      gitlabConfig(),
+      {
+        hosts: [
+          {
+            host: 'atlas',
+            reachable: true,
+            containers: [
+              gitlabContainer('grove-chevro-dind-1'),
+              gitlabContainer('grove-chevro-dind-2'),
+            ],
+            workRoots: {},
+          },
+        ],
+        forges: [
+          entityForge([
+            { systemId: 's_1', status: 'online', busy: false },
+            { systemId: 's_2', status: 'online', busy: false },
+          ]),
+        ],
+      },
+      [gitlabRecord(1, 's_1'), gitlabRecord(2, 's_2')],
+      { registrations: [registration] },
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual([
+      'stop-container',
+      'remove-container',
+      'retire-record',
+      'stop-container',
+      'remove-container',
+      'retire-record',
+      'delete-shared-runner',
+    ]);
+    expect(actions.at(-1)).toMatchObject({
+      forgeRunnerId: '48',
+      registrationId: 7,
+      group: 'chevro-dind',
+    });
+  });
+
+  it('never deregisters a single manager', () => {
+    const actions = planTeardown(
+      gitlabConfig(),
+      {
+        hosts: [
+          {
+            host: 'atlas',
+            reachable: true,
+            containers: [gitlabContainer('grove-chevro-dind-1')],
+            workRoots: {},
+          },
+        ],
+        forges: [
+          entityForge([{ systemId: 's_1', status: 'online', busy: false }]),
+        ],
+      },
+      [gitlabRecord(1, 's_1')],
+    );
+    expect(actions.some((action) => action.kind === 'deregister-runner')).toBe(
+      false,
+    );
+  });
+
+  it('keeps the entity when one manager could not be torn down', () => {
+    const actions = planTeardown(
+      gitlabConfig(),
+      {
+        hosts: [
+          {
+            host: 'atlas',
+            reachable: true,
+            containers: [gitlabContainer('grove-chevro-dind-1')],
+            workRoots: {},
+          },
+          {
+            host: 'nuc',
+            reachable: false,
+            reason: 'ssh timed out',
+            containers: [],
+            workRoots: {},
+          },
+        ],
+        forges: [entityForge()],
+      },
+      [gitlabRecord(1), { ...gitlabRecord(2), host: 'nuc' }],
+      { registrations: [registration] },
+    );
+
+    expect(
+      actions.some((action) => action.kind === 'delete-shared-runner'),
+    ).toBe(false);
+    expect(
+      actions.some(
+        (action) =>
+          action.kind === 'report-degraded' &&
+          action.reason.includes('runner entity at gl-chevro stays'),
+      ),
+    ).toBe(true);
+  });
+
+  it('reports an entity with nothing behind it and leaves it alone', () => {
+    const actions = planTeardown(
+      gitlabConfig(),
+      {
+        hosts: [
+          { host: 'atlas', reachable: true, containers: [], workRoots: {} },
+        ],
+        forges: [entityForge()],
+      },
+      [],
+    );
+    expect(actions).toEqual([
+      {
+        kind: 'report-unmanaged',
+        name: 'grove-chevro-dind',
+        where: 'runner entity 48 at gl-chevro',
+        destructive: false,
+      },
+    ]);
+  });
+
+  it('removes that entity when the operator opts in', () => {
+    const actions = planTeardown(
+      gitlabConfig(),
+      {
+        hosts: [
+          { host: 'atlas', reachable: true, containers: [], workRoots: {} },
+        ],
+        forges: [entityForge()],
+      },
+      [],
+      { includeUnmanaged: true },
+    );
+    expect(actions.map((action) => action.kind)).toEqual([
+      'delete-shared-runner',
+    ]);
+  });
+
+  it('leaves a row that names another entity alone', () => {
+    const actions = planTeardown(
+      gitlabConfig(),
+      {
+        hosts: [
+          {
+            host: 'atlas',
+            reachable: true,
+            containers: [gitlabContainer('grove-chevro-dind-1')],
+            workRoots: {},
+          },
+        ],
+        forges: [
+          entityForge([{ systemId: 's_1', status: 'online', busy: false }]),
+        ],
+      },
+      [gitlabRecord(1, 's_1')],
+      { registrations: [{ ...registration, forgeRunnerId: '99' }] },
+    );
+
+    const deletion = actions.find(
+      (action) => action.kind === 'delete-shared-runner',
+    );
+    expect(deletion).toMatchObject({ forgeRunnerId: '48' });
+    expect(deletion).not.toHaveProperty('registrationId');
+  });
+
+  it('deletes an entity no record points at when a row names it', () => {
+    const actions = planTeardown(
+      gitlabConfig(),
+      {
+        hosts: [
+          { host: 'atlas', reachable: true, containers: [], workRoots: {} },
+        ],
+        forges: [entityForge()],
+      },
+      [],
+      { registrations: [registration] },
+    );
+
+    expect(actions).toEqual([
+      {
+        kind: 'delete-shared-runner',
+        forge: 'gl-chevro',
+        scope: GITLAB_SCOPE,
+        group: 'chevro-dind',
+        name: 'grove-chevro-dind',
+        forgeRunnerId: '48',
+        registrationId: 7,
+        destructive: true,
+      },
+    ]);
+  });
+
+  it('reports an entity no record points at when the row names another', () => {
+    const actions = planTeardown(
+      gitlabConfig(),
+      {
+        hosts: [
+          { host: 'atlas', reachable: true, containers: [], workRoots: {} },
+        ],
+        forges: [entityForge()],
+      },
+      [],
+      { registrations: [{ ...registration, forgeRunnerId: '99' }] },
+    );
+
+    expect(actions).toEqual([
+      {
+        kind: 'report-unmanaged',
+        name: 'grove-chevro-dind',
+        where: 'runner entity 48 at gl-chevro',
+        destructive: false,
+      },
+    ]);
+  });
+
+  it('says nothing about a forge that did not answer', () => {
+    const actions = planTeardown(
+      gitlabConfig(),
+      {
+        hosts: [
+          { host: 'atlas', reachable: true, containers: [], workRoots: {} },
+        ],
+        forges: [{ ...entityForge(), reachable: false, reason: '502' }],
+      },
+      [],
+    );
+    expect(
+      actions.some((action) => action.kind === 'delete-shared-runner'),
+    ).toBe(false);
   });
 });

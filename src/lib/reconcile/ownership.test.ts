@@ -22,6 +22,7 @@ function record(name: string, id = 1): RunnerRecord {
     host: 'mac',
     forge: 'gh-overload',
     forgeRunnerId: null,
+    systemId: null,
     name,
     createdAt: 0,
     retiredAt: null,

@@ -4,7 +4,7 @@ import {
   DEFAULT_DRAIN_TIMEOUT_MS,
   type DockerContainer,
 } from '../stack/index.js';
-import type { RunnerRecord } from '../state/index.js';
+import type { GroupRegistrationRecord, RunnerRecord } from '../state/index.js';
 import type { Action } from './actions.js';
 import {
   describeWhere,
@@ -12,9 +12,17 @@ import {
   type ObservedState,
 } from './observed.js';
 import { classifyRunners } from './ownership.js';
+import {
+  groupForgeKey,
+  orphanSharedEntities,
+  sharedEntities,
+} from './shared.js';
 
 export interface ReconcileOptions {
   drainTimeoutMs?: number;
+  // A GitLab group registers once and starts N managers against one token.
+  // The stored row is what tells grove the entity already exists.
+  registrations?: GroupRegistrationRecord[];
 }
 
 interface DesiredRunner {
@@ -46,6 +54,14 @@ function sightingKey(forge: string, name: string): string {
   return `${forge} ${name}`;
 }
 
+// One group at one forge. A GitLab entity belongs to that pair and to
+// nothing smaller, because every seat of the group shares it.
+// One entity at one forge. Two forges can hand out the same runner id, so
+// the pair is what identifies an entity across the whole pass.
+function entityKey(forge: string, forgeRunnerId: string): string {
+  return `${forge} ${forgeRunnerId}`;
+}
+
 export function reconcile(
   desired: GroveConfig,
   observed: ObservedState,
@@ -55,6 +71,23 @@ export function reconcile(
   const fallbackDrain = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   const hosts = new Map(observed.hosts.map((entry) => [entry.host, entry]));
   const forges = new Map(observed.forges.map((entry) => [entry.forge, entry]));
+  // A forge that gives a whole group one entity. Deleting that entity takes
+  // every manager with it, which is why a scale-down never touches it. The
+  // config says which forges those are, and the observation catches a forge
+  // whose kind changed under a fleet that is already running.
+  const sharedForges = new Set([
+    ...Object.entries(desired.forges)
+      .filter(([, forge]) => forge.kind === 'gitlab')
+      .map(([name]) => name),
+    ...observed.forges
+      .filter((observation) => observation.shared === true)
+      .map((observation) => observation.forge),
+  ]);
+  const registrationByGroup = new Map(
+    (options.registrations ?? [])
+      .filter((row) => row.retiredAt === null)
+      .map((row) => [groupForgeKey(row.group, row.forge), row] as const),
+  );
 
   const unsupported: Action[] = [];
   const degraded: Action[] = [];
@@ -74,15 +107,6 @@ export function reconcile(
         kind: 'report-unsupported',
         group: group.name,
         reason: 'native runners arrive in milestone 4',
-        destructive: false,
-      });
-      continue;
-    }
-    if (desired.forges[group.forge]?.kind !== 'github') {
-      unsupported.push({
-        kind: 'report-unsupported',
-        group: group.name,
-        reason: `forge "${group.forge}" is a GitLab forge, which arrives in milestone 3`,
         destructive: false,
       });
       continue;
@@ -118,7 +142,10 @@ export function reconcile(
 
   // A host or a forge that did not answer is dropped here, so nothing below
   // reads silence as absence and deletes what it cannot see.
-  const observedRunners = flattenObserved(observed, { skipUnreachable: true });
+  const observedRunners = flattenObserved(observed, {
+    skipUnreachable: true,
+    records: activeRecords,
+  });
 
   const containers = new Map<string, DockerContainer>();
   const sightings = new Map<string, ForgeSighting>();
@@ -137,6 +164,25 @@ export function reconcile(
       });
     }
   }
+
+  // Every runner id a reachable forge listed. A stored registration pointing
+  // at an entity somebody deleted is told from a live one right here.
+  const entityIds = new Map<string, Set<string>>();
+  for (const observation of forges.values()) {
+    if (observation.reachable) {
+      entityIds.set(
+        observation.forge,
+        new Set(observation.runners.map((listed) => listed.runner.id)),
+      );
+    }
+  }
+
+  const wantedGroups = new Set(
+    [...wanted.values()].map((entry) =>
+      groupForgeKey(entry.group, entry.forge),
+    ),
+  );
+  const removedByGroup = new Map<string, RunnerRecord[]>();
 
   // Hosts and forges this pass needs and could not reach.
   const relevantHosts = new Set<string>();
@@ -171,7 +217,7 @@ export function reconcile(
       });
     }
   }
-  for (const entry of observed.forges) {
+  for (const entry of forges.values()) {
     if (!entry.reachable) {
       degraded.push({
         kind: 'report-degraded',
@@ -257,6 +303,17 @@ export function reconcile(
         }
         continue;
       }
+      const stored = sharedForges.has(entry.forge)
+        ? registrationByGroup.get(groupForgeKey(entry.group, entry.forge))
+        : undefined;
+      // The id of the entity behind the stored row, when the forge no longer
+      // lists it. apply retires that row and no other, so a row another
+      // process minted in between survives.
+      const renew =
+        stored !== undefined &&
+        entityIds.get(entry.forge)?.has(stored.forgeRunnerId) !== true
+          ? stored.forgeRunnerId
+          : undefined;
       converge.push({
         kind: 'create-runner',
         host: entry.host,
@@ -265,7 +322,10 @@ export function reconcile(
         index: entry.index,
         name: entry.name,
         ...(record === undefined ? {} : { recordId: record.id }),
-        destructive: false,
+        ...(renew === undefined ? {} : { renewRegistration: renew }),
+        // Renewing throws away the only copy of a glrt- token, so the
+        // operator answers the confirmation prompt first.
+        destructive: renew !== undefined,
       });
       continue;
     }
@@ -329,6 +389,7 @@ export function reconcile(
     // Only the forge this record names. A colliding name at another forge is
     // unmanaged there, so grove must never delete it.
     const sighting = sightings.get(sightingKey(record.forge, record.name));
+    const shared = sharedForges.has(record.forge);
     const drainTimeoutMs = drainByGroup.get(record.group) ?? fallbackDrain;
 
     if (container !== undefined) {
@@ -341,7 +402,10 @@ export function reconcile(
         destructive: true,
       });
     }
-    if (sighting !== undefined) {
+    // One entity serves every manager in the group, so removing one seat
+    // must not deregister anything. The entity goes below, once the last
+    // record for the group has gone with it.
+    if (sighting !== undefined && !shared) {
       removals.push({
         kind: 'deregister-runner',
         host: record.host,
@@ -381,6 +445,71 @@ export function reconcile(
       recordId: record.id,
       destructive: true,
     });
+    const groupKey = groupForgeKey(record.group, record.forge);
+    removedByGroup.set(groupKey, [
+      ...(removedByGroup.get(groupKey) ?? []),
+      record,
+    ]);
+  }
+
+  // The entity goes only when every record behind it goes with it, and only
+  // when the config wants no seat in that group any more.
+  const ownedEntities = new Set<string>();
+  for (const observation of forges.values()) {
+    if (observation.shared !== true || !observation.reachable) {
+      continue;
+    }
+    for (const entity of sharedEntities(observation, activeRecords)) {
+      const key = groupForgeKey(entity.group, entity.forge);
+      const registration = registrationByGroup.get(key);
+      // An open registration row naming this id is what proves grove minted
+      // the entity. That is ownership, and it holds whether the config still
+      // wants the group and whether this pass deletes the entity, so the
+      // report below never calls it somebody else's.
+      const owned = registration?.forgeRunnerId === entity.runner.id;
+      if (owned) {
+        ownedEntities.add(entityKey(entity.forge, entity.runner.id));
+      }
+      if (wantedGroups.has(key)) {
+        continue;
+      }
+      let host: string | undefined;
+      if (entity.records.length === 0) {
+        // Nothing points at this entity any more. Without the proof above it
+        // belongs to somebody else, and grove only reports it.
+        if (!owned) {
+          continue;
+        }
+      } else {
+        const removedIds = new Set(
+          (removedByGroup.get(key) ?? []).map((record) => record.id),
+        );
+        if (!entity.records.every((record) => removedIds.has(record.id))) {
+          continue;
+        }
+        // The highest-index seat, so the delete queues behind that host's own
+        // removals rather than in a bucket of its own. A seat on another host
+        // races it. A sibling on this host whose stop failed does not hold it
+        // back either, because no seat carries the entity description. Either
+        // way a container keeps running against an entity that is gone. It
+        // draws no more jobs, its record was never retired, and the next pass
+        // stops it again.
+        host = entity.records[entity.records.length - 1].host;
+      }
+      removals.push({
+        kind: 'delete-shared-runner',
+        ...(host === undefined ? {} : { host }),
+        forge: entity.forge,
+        scope: entity.scope,
+        group: entity.group,
+        name: entity.runner.name,
+        forgeRunnerId: entity.runner.id,
+        ...(registration === undefined
+          ? {}
+          : { registrationId: registration.id }),
+        destructive: true,
+      });
+    }
   }
 
   for (const entry of classifyRunners(observedRunners, activeRecords)) {
@@ -392,6 +521,22 @@ export function reconcile(
       name: entry.name,
       where: describeWhere(entry),
       ...(entry.host === undefined ? {} : { host: entry.host }),
+      destructive: false,
+    });
+  }
+
+  // A shared entity produces no sighting when no record claims it, so it
+  // would otherwise be invisible. The name matches the convention and no
+  // record backs it, which is exactly the unmanaged cell. An entity grove
+  // owns is not, however few records point at it right now.
+  for (const entity of orphanSharedEntities(observed, activeRecords)) {
+    if (ownedEntities.has(entityKey(entity.forge, entity.runner.id))) {
+      continue;
+    }
+    reports.push({
+      kind: 'report-unmanaged',
+      name: entity.runner.name,
+      where: `runner entity ${entity.runner.id} at ${entity.forge}`,
       destructive: false,
     });
   }

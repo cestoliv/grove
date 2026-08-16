@@ -24,6 +24,7 @@ function report(overrides: Partial<StatusReport> = {}): StatusReport {
   return {
     configPath: '/work/grove.yaml',
     rows: [row()],
+    sharedRunners: [],
     unreachableHosts: [],
     unreachableForges: [],
     ok: true,
@@ -94,5 +95,87 @@ describe('renderStatusReport', () => {
     );
     expect(text).toContain('Did not answer: host atlas, forge gh-overload');
     expect(text).not.toContain('Every host and forge answered.');
+  });
+});
+
+describe('renderStatusReport, managers', () => {
+  const base = {
+    configPath: '/tmp/grove.yaml',
+    unreachableHosts: [],
+    unreachableForges: [],
+    ok: true,
+  };
+
+  it('adds a manager column when a row has one', () => {
+    const text = renderStatusReport(
+      {
+        ...base,
+        rows: [
+          {
+            group: 'chevro-dind',
+            host: 'atlas',
+            runner: 'grove-chevro-dind-1',
+            container: 'running',
+            containerStatus: 'Up 2 hours',
+            forge: 'gl-chevro',
+            forgeStatus: 'online',
+            managerStatus: 'online',
+            systemId: 's_aaaaaaaaaaaa',
+            ownership: 'managed',
+          },
+        ],
+        sharedRunners: [],
+      },
+      { color: false },
+    );
+    expect(text).toContain('MANAGER');
+    expect(text).toMatch(/online\s+online\s+managed/);
+  });
+
+  it('leaves the manager column out of a GitHub only fleet', () => {
+    const text = renderStatusReport(
+      {
+        ...base,
+        rows: [
+          {
+            group: 'overload-arm',
+            host: 'mac',
+            runner: 'grove-overload-arm-1',
+            container: 'running',
+            containerStatus: 'Up 1 hour',
+            forge: 'gh-overload',
+            forgeStatus: 'online',
+            ownership: 'managed',
+          },
+        ],
+        sharedRunners: [],
+      },
+      { color: false },
+    );
+    expect(text).not.toContain('MANAGER');
+  });
+
+  it('lists every shared entity with its tags and its manager count', () => {
+    const text = renderStatusReport(
+      {
+        ...base,
+        rows: [],
+        sharedRunners: [
+          {
+            forge: 'gl-chevro',
+            group: 'chevro-dind',
+            entityId: '48',
+            description: 'grove-chevro-dind',
+            tags: ['docker', 'dind'],
+            managers: 2,
+            expected: 3,
+          },
+        ],
+      },
+      { color: false },
+    );
+    expect(text).toContain('Shared runners');
+    expect(text).toContain('docker,dind');
+    expect(text).toContain('2/3');
   });
 });

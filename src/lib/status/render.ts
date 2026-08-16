@@ -18,6 +18,11 @@ export function renderStatusReport(
   if (report.rows.length === 0) {
     lines.push('  no runner, managed or otherwise, was found');
   } else {
+    // The column only earns its width when a forge in this fleet has
+    // managers at all.
+    const showManagers = report.rows.some(
+      (row) => row.managerStatus !== undefined,
+    );
     const rows = report.rows.map((row) => [
       row.group,
       row.host,
@@ -25,10 +30,20 @@ export function renderStatusReport(
       row.container,
       row.containerStatus,
       row.forgeStatus,
+      ...(showManagers ? [row.managerStatus ?? '-'] : []),
       row.ownership,
     ]);
     for (const line of renderTable(
-      ['GROUP', 'HOST', 'RUNNER', 'CONTAINER', 'DETAIL', 'FORGE', 'OWNER'],
+      [
+        'GROUP',
+        'HOST',
+        'RUNNER',
+        'CONTAINER',
+        'DETAIL',
+        'FORGE',
+        ...(showManagers ? ['MANAGER'] : []),
+        'OWNER',
+      ],
       rows,
       {
         paintCell: (value, columnIndex) => {
@@ -42,6 +57,22 @@ export function renderStatusReport(
           return state === 'online' ? c.green(value) : c.red(value);
         },
       },
+    )) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  if (report.sharedRunners.length > 0) {
+    lines.push('', 'Shared runners');
+    for (const line of renderTable(
+      ['FORGE', 'GROUP', 'ENTITY', 'TAGS', 'MANAGERS'],
+      report.sharedRunners.map((entity) => [
+        entity.forge,
+        entity.group,
+        entity.entityId,
+        entity.tags.join(','),
+        `${entity.managers}/${entity.expected}`,
+      ]),
     )) {
       lines.push(`  ${line}`);
     }

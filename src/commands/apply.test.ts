@@ -321,3 +321,88 @@ describe('runApply', () => {
     ]);
   });
 });
+
+const GITLAB_CONFIG = `
+hosts:
+  atlas: { type: ssh, host: atlas, work_root: /PROD/local/grove }
+
+forges:
+  gl-chevro: { kind: gitlab, url: https://git.chevro.fr }
+
+groups:
+  - name: chevro-dind
+    forge: gl-chevro
+    scope: { level: instance }
+    placement: { atlas: 1 }
+    tags: [docker]
+`;
+
+function atlas(psOutput = ''): FakeTransport {
+  return new FakeTransport('atlas')
+    .on('uname', { stdout: 'Linux x86_64\n' })
+    .on('sh -c printf', { stdout: '/root' })
+    .on('docker ps', { stdout: psOutput })
+    .on('sh -c set --', { stdout: 'grove-chevro-dind-1\ts_aaaaaaaaaaaa\n' })
+    .on('docker run', { stdout: 'beef42\n' });
+}
+
+function gitlabClient(): FakeForgeClient {
+  return new FakeForgeClient('gl-chevro', {
+    kind: 'gitlab',
+    sharedRegistration: true,
+  });
+}
+
+const RUNNING_DIND = `${JSON.stringify({
+  ID: 'a1',
+  Names: 'grove-chevro-dind-1',
+  State: 'running',
+  Image: 'gitlab/gitlab-runner:latest',
+  Status: 'Up 2 hours',
+  CreatedAt: 'now',
+})}\n`;
+
+describe('runApply, a GitLab group', () => {
+  it('creates one entity for the group and registers the container against it', async () => {
+    await write(GITLAB_CONFIG);
+    const forge = gitlabClient();
+    const transport = atlas();
+    const code = await runApply({
+      ...options(transport),
+      createForgeClient: () => forge,
+      yes: true,
+    });
+
+    expect(code).toBe(EXIT_OK);
+    expect(forge.registrations).toHaveLength(1);
+    expect(forge.registrations[0].name).toBe('grove-chevro-dind');
+    expect(forge.registrations[0].tags).toEqual(['docker']);
+    expect(store.activeGroupRegistrations()).toHaveLength(1);
+    expect(
+      transport
+        .commandLines()
+        .some((line) => line.includes('gitlab-runner register')),
+    ).toBe(true);
+  });
+
+  it('learns the system id on the pass after the container started', async () => {
+    await write(GITLAB_CONFIG);
+    const forge = gitlabClient();
+
+    await runApply({
+      ...options(atlas()),
+      createForgeClient: () => forge,
+      yes: true,
+    });
+    await runApply({
+      ...options(atlas(RUNNING_DIND)),
+      createForgeClient: () => forge,
+      yes: true,
+    });
+
+    const [record] = store.activeRunners();
+    expect(record.systemId).toBe('s_aaaaaaaaaaaa');
+    // Still one entity. The second pass had nothing to create.
+    expect(forge.registrations).toHaveLength(1);
+  });
+});

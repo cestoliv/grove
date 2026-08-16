@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError } from '../config/errors.js';
-import type { GroupConfig, GroveConfig, HostConfig } from '../config/index.js';
+import type { GroupConfig, HostConfig } from '../config/index.js';
 import {
   buildBuildArgs,
   buildEntrypointCommand,
@@ -10,7 +9,6 @@ import {
   buildRunnerSpec,
   DEFAULT_GITHUB_RUNNER_IMAGE,
   rawDockerOptions,
-  rawDockerWarnings,
 } from './docker-args.js';
 
 const host = { type: 'local', work_root: '/Volumes/ci/grove' } as HostConfig;
@@ -47,6 +45,7 @@ describe('buildRunnerSpec', () => {
       image: DEFAULT_GITHUB_RUNNER_IMAGE,
       workDir: '/Volumes/ci/grove/overload-arm-1',
       cacheDir: '/Volumes/ci/grove-cache/overload-arm-1',
+      configDir: '/Volumes/ci/grove/overload-arm-1-config',
       registrationUrl: 'https://github.com/Overload-coach',
       registrationToken: 'AABBCC',
       labels: ['arm64'],
@@ -134,6 +133,7 @@ describe('buildRunnerDirs', () => {
       index: 2,
       workDir: '/Volumes/ci/grove/overload-arm-2',
       cacheDir: '/Volumes/ci/grove-cache/overload-arm-2',
+      configDir: '/Volumes/ci/grove/overload-arm-2-config',
     });
   });
 });
@@ -294,66 +294,5 @@ describe('rawDockerOptions', () => {
     expect(() => rawDockerOptions({ env: { A: { deep: true } } })).toThrow(
       /raw.env.A must be a string, number or boolean/,
     );
-  });
-});
-
-describe('rawDockerWarnings', () => {
-  it('names every raw key the Docker stack ignores', () => {
-    const config = {
-      groups: [group({ raw: { config_toml: 'x', env: { A: 'b' } } })],
-    } as GroveConfig;
-    expect(rawDockerWarnings(config)).toEqual([
-      {
-        code: 'raw-unused',
-        path: 'groups[0].raw.config_toml',
-        message:
-          'the Docker stack reads docker_run_args and env from raw, and passes nothing else through. grove proceeds anyway.',
-      },
-    ]);
-  });
-
-  it('says nothing about a native group', () => {
-    const config = {
-      groups: [group({ stack: 'native', raw: { plist_extra: 'x' } })],
-    } as GroveConfig;
-    expect(rawDockerWarnings(config)).toEqual([]);
-  });
-
-  it('reports a malformed raw.docker_run_args as a ConfigError, not a throw from deep inside plan', () => {
-    const config = {
-      groups: [group({ raw: { docker_run_args: 'nope' } })],
-    } as GroveConfig;
-    let error: unknown;
-    try {
-      rawDockerWarnings(config);
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error).toBeInstanceOf(ConfigError);
-    expect((error as ConfigError).issues).toEqual([
-      {
-        path: 'groups[0].raw.docker_run_args',
-        message: 'raw.docker_run_args must be a list of strings',
-      },
-    ]);
-  });
-
-  it('reports a malformed raw.env as a ConfigError', () => {
-    const config = {
-      groups: [group({ raw: { env: ['x'] } })],
-    } as GroveConfig;
-    let error: unknown;
-    try {
-      rawDockerWarnings(config);
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error).toBeInstanceOf(ConfigError);
-    expect((error as ConfigError).issues).toEqual([
-      {
-        path: 'groups[0].raw.env',
-        message: 'raw.env must be a mapping of names to values',
-      },
-    ]);
   });
 });

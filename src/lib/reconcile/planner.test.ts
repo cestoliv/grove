@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GroveConfig } from '../config/index.js';
 import type { DockerContainer } from '../stack/index.js';
-import type { RunnerRecord } from '../state/index.js';
+import type { GroupRegistrationRecord, RunnerRecord } from '../state/index.js';
 import type { Action } from './actions.js';
 import type {
   ForgeObservation,
@@ -74,6 +74,7 @@ function record(
     host: 'mac',
     forge: 'gh-overload',
     forgeRunnerId: null,
+    systemId: null,
     name,
     createdAt: 0,
     retiredAt: null,
@@ -492,7 +493,7 @@ describe('reconcile, guards and unsupported stacks', () => {
     expect(actions[0]).toMatchObject({ target: 'grove-overload-arm-1' });
   });
 
-  it('skips a native group and a GitLab forge without failing the run', () => {
+  it('skips a native group without failing the run', () => {
     const desired = config({
       forges: {
         'gh-overload': { kind: 'github' },
@@ -506,22 +507,11 @@ describe('reconcile, guards and unsupported stacks', () => {
           placement: { mac: 1 },
           stack: 'native',
         },
-        {
-          name: 'chevro-dind',
-          forge: 'gl-chevro',
-          scope: { level: 'instance' },
-          placement: { atlas: 3 },
-          stack: 'docker',
-        },
       ],
     } as Partial<GroveConfig>);
     const actions = reconcile(desired, observed(), []);
-    expect(kinds(actions)).toEqual([
-      'report-unsupported',
-      'report-unsupported',
-    ]);
+    expect(kinds(actions)).toEqual(['report-unsupported']);
     expect(actions[0]).toMatchObject({ group: 'ios' });
-    expect(actions[1]).toMatchObject({ group: 'chevro-dind' });
   });
 });
 
@@ -808,5 +798,359 @@ describe('reconcile, a start that needs no forge call', () => {
       reason: expect.stringContaining('was not observed'),
     });
     expect(actions[1]).toMatchObject({ name: 'grove-overload-arm-1' });
+  });
+});
+
+describe('reconcile, a GitLab group', () => {
+  const GITLAB_SCOPE = { level: 'instance' } as const;
+
+  function gitlabConfig(count = 3): GroveConfig {
+    return config({
+      forges: {
+        'gl-chevro': { kind: 'gitlab', url: 'https://git.chevro.fr' },
+      },
+      groups: [
+        {
+          name: 'chevro-dind',
+          forge: 'gl-chevro',
+          scope: GITLAB_SCOPE,
+          placement: { atlas: count },
+          stack: 'docker',
+          tags: ['docker'],
+        },
+      ],
+    } as Partial<GroveConfig>);
+  }
+
+  // The group is gone from the config, which is what makes its seats
+  // surplus and its entity unwanted.
+  function emptyGitlabConfig(): GroveConfig {
+    return config({
+      forges: {
+        'gl-chevro': { kind: 'gitlab', url: 'https://git.chevro.fr' },
+      },
+      groups: [],
+    } as Partial<GroveConfig>);
+  }
+
+  function gitlabRecord(
+    index: number,
+    systemId: string | null = null,
+    host = 'atlas',
+  ) {
+    return record(`grove-chevro-dind-${index}`, {
+      id: index,
+      group: 'chevro-dind',
+      index,
+      host,
+      forge: 'gl-chevro',
+      forgeRunnerId: '48',
+      systemId,
+    });
+  }
+
+  function registration(
+    overrides: Partial<GroupRegistrationRecord> = {},
+  ): GroupRegistrationRecord {
+    return {
+      id: 7,
+      group: 'chevro-dind',
+      forge: 'gl-chevro',
+      forgeRunnerId: '48',
+      url: 'https://git.chevro.fr',
+      token: ['glrt', 'K1l2M3n4O5p6Q7r8S9t0'].join('-'),
+      createdAt: 1,
+      retiredAt: null,
+      ...overrides,
+    };
+  }
+
+  function entityForge(
+    managers: Array<{ systemId: string; status: string; busy: boolean }> = [],
+    overrides: Partial<ForgeObservation> = {},
+  ): ForgeObservation {
+    return forge({
+      forge: 'gl-chevro',
+      shared: true,
+      runners: [
+        {
+          runner: {
+            id: '48',
+            name: 'grove-chevro-dind',
+            status: 'online',
+            busy: false,
+            labels: ['docker'],
+            managers,
+          },
+          scope: GITLAB_SCOPE,
+        },
+      ],
+      ...overrides,
+    });
+  }
+
+  function atlas(containers: DockerContainer[] = []): HostObservation {
+    return host({ host: 'atlas', containers });
+  }
+
+  it('creates a seat for every count, and never reports the group as skipped', () => {
+    const actions = reconcile(
+      gitlabConfig(),
+      {
+        hosts: [atlas()],
+        forges: [forge({ forge: 'gl-chevro', shared: true })],
+      },
+      [],
+    );
+    expect(kinds(actions)).toEqual([
+      'create-runner',
+      'create-runner',
+      'create-runner',
+    ]);
+    expect(
+      actions.every((action) => action.kind !== 'report-unsupported'),
+    ).toBe(true);
+  });
+
+  it('leaves the entity alone when one of three managers scales down', () => {
+    const actions = reconcile(
+      gitlabConfig(2),
+      {
+        hosts: [
+          atlas([
+            container('grove-chevro-dind-1'),
+            container('grove-chevro-dind-2'),
+            container('grove-chevro-dind-3'),
+          ]),
+        ],
+        forges: [
+          entityForge([
+            { systemId: 's_1', status: 'online', busy: false },
+            { systemId: 's_2', status: 'online', busy: false },
+            { systemId: 's_3', status: 'online', busy: false },
+          ]),
+        ],
+      },
+      [gitlabRecord(1, 's_1'), gitlabRecord(2, 's_2'), gitlabRecord(3, 's_3')],
+    );
+
+    expect(kinds(actions)).toEqual([
+      'stop-container',
+      'remove-container',
+      'retire-record',
+    ]);
+    expect(actions.some((action) => action.kind === 'deregister-runner')).toBe(
+      false,
+    );
+    expect(
+      actions.some((action) => action.kind === 'delete-shared-runner'),
+    ).toBe(false);
+  });
+
+  it('deletes the entity when the last manager goes', () => {
+    const actions = reconcile(
+      emptyGitlabConfig(),
+      {
+        hosts: [atlas([container('grove-chevro-dind-1')])],
+        forges: [
+          entityForge([{ systemId: 's_1', status: 'online', busy: false }]),
+        ],
+      },
+      [gitlabRecord(1, 's_1')],
+    );
+
+    const deletion = actions.find(
+      (action) => action.kind === 'delete-shared-runner',
+    );
+    expect(deletion).toMatchObject({
+      forge: 'gl-chevro',
+      group: 'chevro-dind',
+      name: 'grove-chevro-dind',
+      forgeRunnerId: '48',
+      host: 'atlas',
+      destructive: true,
+    });
+    expect(kinds(actions).at(-1)).toBe('delete-shared-runner');
+  });
+
+  it('deletes the entity in the bucket of the highest-index seat', () => {
+    const actions = reconcile(
+      emptyGitlabConfig(),
+      {
+        hosts: [
+          host({ containers: [container('grove-chevro-dind-1')] }),
+          atlas([container('grove-chevro-dind-2')]),
+        ],
+        forges: [entityForge()],
+      },
+      [gitlabRecord(1, null, 'mac'), gitlabRecord(2)],
+    );
+
+    expect(kinds(actions)).toEqual([
+      'stop-container',
+      'remove-container',
+      'retire-record',
+      'stop-container',
+      'remove-container',
+      'retire-record',
+      'delete-shared-runner',
+    ]);
+    // Seat 2 sits on atlas and holds the highest index, so the delete queues
+    // behind that host's own removals.
+    expect(actions.at(-1)).toMatchObject({
+      kind: 'delete-shared-runner',
+      host: 'atlas',
+    });
+  });
+
+  it('retires the stored registration row along with the entity', () => {
+    const actions = reconcile(
+      emptyGitlabConfig(),
+      {
+        hosts: [atlas([container('grove-chevro-dind-1')])],
+        forges: [entityForge()],
+      },
+      [gitlabRecord(1)],
+      { registrations: [registration()] },
+    );
+    expect(
+      actions.find((action) => action.kind === 'delete-shared-runner'),
+    ).toMatchObject({ registrationId: 7 });
+  });
+
+  it('keeps the entity when the host holding a seat did not answer', () => {
+    const actions = reconcile(
+      emptyGitlabConfig(),
+      {
+        hosts: [{ ...atlas(), reachable: false, reason: 'ssh timed out' }],
+        forges: [entityForge()],
+      },
+      [gitlabRecord(1)],
+    );
+    expect(
+      actions.some((action) => action.kind === 'delete-shared-runner'),
+    ).toBe(false);
+    expect(kinds(actions)).toContain('report-degraded');
+  });
+
+  it('renews a registration whose entity the forge no longer lists', () => {
+    const actions = reconcile(
+      gitlabConfig(1),
+      {
+        hosts: [atlas()],
+        forges: [forge({ forge: 'gl-chevro', shared: true, runners: [] })],
+      },
+      [],
+      { registrations: [registration()] },
+    );
+    expect(actions[0]).toMatchObject({
+      kind: 'create-runner',
+      // The id the planner judged gone, so apply retires that row and no
+      // other.
+      renewRegistration: '48',
+      destructive: true,
+    });
+  });
+
+  it('renews against the id of the row it read, not the one it will mint', () => {
+    const actions = reconcile(
+      gitlabConfig(1),
+      {
+        hosts: [atlas()],
+        forges: [forge({ forge: 'gl-chevro', shared: true, runners: [] })],
+      },
+      [],
+      { registrations: [registration({ forgeRunnerId: '77' })] },
+    );
+    expect(actions[0]).toMatchObject({ renewRegistration: '77' });
+  });
+
+  it('reuses a registration whose entity is still there', () => {
+    const actions = reconcile(
+      gitlabConfig(1),
+      { hosts: [atlas()], forges: [entityForge()] },
+      [],
+      { registrations: [registration()] },
+    );
+    expect(kinds(actions)).toEqual(['create-runner']);
+    expect(actions[0]).not.toHaveProperty('renewRegistration');
+  });
+
+  it('never reports an entity it owns as unmanaged', () => {
+    const actions = reconcile(
+      gitlabConfig(1),
+      { hosts: [atlas()], forges: [entityForge()] },
+      [],
+      { registrations: [registration()] },
+    );
+    // No record points at the entity yet, and the registration row is what
+    // says grove minted it, so the seat below reuses it rather than minting
+    // a second one.
+    expect(kinds(actions)).toEqual(['create-runner']);
+    expect(actions[0]).toMatchObject({
+      kind: 'create-runner',
+      name: 'grove-chevro-dind-1',
+    });
+    expect(actions[0]).not.toHaveProperty('renewRegistration');
+    expect(actions.some((action) => action.kind === 'report-unmanaged')).toBe(
+      false,
+    );
+  });
+
+  it('reports an entity grove named that no record claims', () => {
+    const actions = reconcile(
+      emptyGitlabConfig(),
+      { hosts: [atlas()], forges: [entityForge()] },
+      [],
+    );
+    expect(
+      actions.find((action) => action.kind === 'report-unmanaged'),
+    ).toMatchObject({
+      name: 'grove-chevro-dind',
+      where: 'runner entity 48 at gl-chevro',
+    });
+  });
+
+  it('deletes an unclaimed entity a live registration proves grove minted', () => {
+    const actions = reconcile(
+      emptyGitlabConfig(),
+      { hosts: [atlas()], forges: [entityForge()] },
+      [],
+      { registrations: [registration()] },
+    );
+    expect(kinds(actions)).toEqual(['delete-shared-runner']);
+    expect(actions[0]).toMatchObject({
+      forge: 'gl-chevro',
+      group: 'chevro-dind',
+      name: 'grove-chevro-dind',
+      forgeRunnerId: '48',
+      registrationId: 7,
+    });
+  });
+
+  it('reports an unclaimed entity whose registration names another id', () => {
+    const actions = reconcile(
+      emptyGitlabConfig(),
+      { hosts: [atlas()], forges: [entityForge()] },
+      [],
+      { registrations: [registration({ forgeRunnerId: '99' })] },
+    );
+    expect(
+      actions.some((action) => action.kind === 'delete-shared-runner'),
+    ).toBe(false);
+    expect(kinds(actions)).toContain('report-unmanaged');
+  });
+
+  it('reports an unclaimed entity whose registration is already retired', () => {
+    const actions = reconcile(
+      emptyGitlabConfig(),
+      { hosts: [atlas()], forges: [entityForge()] },
+      [],
+      { registrations: [registration({ retiredAt: 5 })] },
+    );
+    expect(
+      actions.some((action) => action.kind === 'delete-shared-runner'),
+    ).toBe(false);
+    expect(kinds(actions)).toContain('report-unmanaged');
   });
 });

@@ -19,16 +19,22 @@ export function privilegedSocketWarnings(config: GroveConfig): ConfigWarning[] {
     if (group.privileged !== true) {
       continue;
     }
-    const mountsSocket = (group.volumes ?? []).some(
+    // grove mounts the host socket into a GitLab runner itself, so the
+    // operator does not have to list it for the group to be root equivalent.
+    const gitlab = config.forges[group.forge]?.kind === 'gitlab';
+    const listsSocket = (group.volumes ?? []).some(
       (volume) => volume.split(':')[0] === DOCKER_SOCKET_PATH,
     );
-    if (!mountsSocket) {
+    if (!gitlab && !listsSocket) {
       continue;
     }
+    const cause = gitlab
+      ? `runs privileged job containers, and grove mounts ${DOCKER_SOCKET_PATH} into the runner`
+      : `runs privileged and mounts ${DOCKER_SOCKET_PATH}`;
     warnings.push({
       code: 'privileged-docker-socket',
       path: `groups[${index}]`,
-      message: `group "${group.name}" runs privileged and mounts ${DOCKER_SOCKET_PATH}. Any job on that runner can take root on the host. grove proceeds anyway.`,
+      message: `group "${group.name}" ${cause}. Any job on that runner can take root on the host. grove proceeds anyway.`,
     });
   }
   return warnings;

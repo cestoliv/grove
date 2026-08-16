@@ -1,5 +1,5 @@
 import { EXIT_OK, EXIT_UNREACHABLE } from '../lib/exit-codes.js';
-import { observeFleet } from '../lib/reconcile/index.js';
+import { observeFleet, persistSystemIds } from '../lib/reconcile/index.js';
 import { renderStatusReport } from '../lib/status/render.js';
 import { buildStatusReport, livenessFor } from '../lib/status/report.js';
 import type { FleetContext } from './context.js';
@@ -31,6 +31,9 @@ export async function runStatus(
         ? {}
         : { probeTimeoutMs: options.probeTimeoutMs }),
     });
+    // Before the records are read, so a manager grove just learned about
+    // shows up in this run rather than the next one.
+    persistSystemIds(observed, fleet.store.activeRunners(), fleet.store);
     const report = buildStatusReport(
       fleet.loaded,
       observed,
