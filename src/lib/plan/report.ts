@@ -5,13 +5,7 @@ import {
   type LoadedConfig,
   type Scope,
 } from '../config/index.js';
-import {
-  type ConnectFn,
-  connect as defaultConnect,
-  type HostProbe,
-  probeHosts,
-  type Transport,
-} from '../transport/index.js';
+import type { Action, ObservedState } from '../reconcile/index.js';
 
 export interface PlanPlacementRow {
   host: string;
@@ -43,60 +37,52 @@ export interface PlanReport {
   hosts: PlanHostRow[];
   groups: PlanGroupRow[];
   warnings: ConfigWarning[];
+  actions: Action[];
   unreachable: string[];
+  degraded: string[];
   ok: boolean;
 }
 
 export interface BuildPlanOptions {
-  connect?: ConnectFn;
-  probeTimeoutMs?: number;
+  observed: ObservedState;
+  actions?: Action[];
+  extraWarnings?: ConfigWarning[];
 }
 
 export function formatScope(scope: Scope): string {
   return 'target' in scope ? `${scope.level} ${scope.target}` : scope.level;
 }
 
-export async function buildPlanReport(
+export function buildPlanReport(
   loaded: LoadedConfig,
-  options: BuildPlanOptions = {},
-): Promise<PlanReport> {
-  const connectFn = options.connect ?? defaultConnect;
-  const transports = new Map<string, Transport>();
-  for (const [name, host] of Object.entries(loaded.config.hosts)) {
-    transports.set(name, connectFn(name, host));
-  }
+  options: BuildPlanOptions,
+): PlanReport {
+  const actions = options.actions ?? [];
+  const observedByHost = new Map(
+    options.observed.hosts.map((entry) => [entry.host, entry]),
+  );
 
-  let probes: HostProbe[] = [];
-  try {
-    probes = await probeHosts(transports, options.probeTimeoutMs);
-  } finally {
-    await Promise.all(
-      [...transports.values()].map((transport) =>
-        transport.close().catch(() => undefined),
-      ),
-    );
-  }
-
-  const probeByHost = new Map(probes.map((probe) => [probe.host, probe]));
   const hosts: PlanHostRow[] = Object.entries(loaded.config.hosts).map(
     ([name, host]) => {
-      const probe = probeByHost.get(name);
-      const reachable = probe?.reachable ?? false;
+      const observation = observedByHost.get(name);
+      const reachable = observation?.reachable ?? false;
       return {
         name,
         type: host.type,
         target: host.type === 'ssh' ? host.host : 'this machine',
         reachable,
-        reason: reachable ? undefined : (probe?.reason ?? 'not probed'),
-        arch: reachable ? probe?.arch : undefined,
+        reason: reachable
+          ? undefined
+          : (observation?.reason ?? 'not observed on this pass'),
+        arch: reachable ? observation?.arch : undefined,
       };
     },
   );
 
   const archByHost = new Map<string, string>();
-  for (const probe of probes) {
-    if (probe.arch !== undefined) {
-      archByHost.set(probe.host, probe.arch);
+  for (const observation of options.observed.hosts) {
+    if (observation.reachable && observation.arch !== undefined) {
+      archByHost.set(observation.host, observation.arch);
     }
   }
 
@@ -121,12 +107,26 @@ export async function buildPlanReport(
     .filter((host) => !host.reachable)
     .map((host) => host.name);
 
+  const degraded = [
+    ...new Set(
+      actions
+        .filter((action) => action.kind === 'report-degraded')
+        .map((action) => action.target),
+    ),
+  ].filter((target) => !unreachable.includes(target));
+
   return {
     configPath: loaded.path,
     hosts,
     groups,
-    warnings: [...loaded.warnings, ...archWarnings(loaded.config, archByHost)],
+    warnings: [
+      ...loaded.warnings,
+      ...archWarnings(loaded.config, archByHost),
+      ...(options.extraWarnings ?? []),
+    ],
+    actions,
     unreachable,
-    ok: unreachable.length === 0,
+    degraded,
+    ok: unreachable.length === 0 && degraded.length === 0,
   };
 }

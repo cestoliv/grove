@@ -21,7 +21,7 @@
   "author": "Olivier Cartier <me@cestoliv.com>",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0"
   },
   "type": "module",
   "bin": {

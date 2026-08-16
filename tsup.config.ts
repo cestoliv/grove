@@ -8,9 +8,12 @@ const { version } = JSON.parse(
 export default defineConfig({
   entry: { grove: 'src/grove.ts' },
   format: ['esm'],
-  target: 'node20',
+  target: 'node22',
   clean: true,
   shims: true,
+  // tsup rewrites `node:sqlite` to `sqlite`, and that module has no bare
+  // alias, so every command that opens the state store dies in the bundle.
+  removeNodeProtocol: false,
   define: { __VERSION__: JSON.stringify(version) },
   banner: { js: '#!/usr/bin/env node' },
 });

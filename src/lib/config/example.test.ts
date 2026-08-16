@@ -21,6 +21,7 @@ describe('grove.example.yaml', () => {
       'overload-arm',
       'chevro-dind',
       'ios',
+      'api-repo',
     ]);
   });
 
@@ -41,6 +42,17 @@ describe('grove.example.yaml', () => {
     expect(loaded.warnings.map((warning) => warning.code)).toEqual([
       'privileged-docker-socket',
     ]);
+  });
+
+  it('shows the docker escape hatch the README documents', async () => {
+    const loaded = await loadConfig({
+      path: EXAMPLE_PATH,
+      env: { GH_TOKEN: 'example-token' },
+    });
+    expect(loaded.config.groups[3].raw).toEqual({
+      docker_run_args: ['--dns', '1.1.1.1'],
+      env: { HTTPS_PROXY: 'http://proxy.internal:3128' },
+    });
   });
 
   it('uses environment interpolation rather than a literal token', async () => {

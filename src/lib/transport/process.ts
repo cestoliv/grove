@@ -37,10 +37,12 @@ export function runProcess(
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
       stdout += chunk;
+      options.onStdout?.(chunk);
     });
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (chunk: string) => {
       stderr += chunk;
+      options.onStderr?.(chunk);
     });
 
     child.on('error', (error: Error) => {

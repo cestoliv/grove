@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { LocalTransport } from './local.js';
 import { TIMEOUT_EXIT_CODE } from './process.js';
+import { createFakeSpawn } from './test-utils.js';
 
 let dir: string;
 
@@ -106,5 +107,26 @@ describe('LocalTransport', () => {
   it('defaults its name to local', () => {
     expect(new LocalTransport().name).toBe('local');
     expect(new LocalTransport('mac').name).toBe('mac');
+  });
+});
+
+describe('LocalTransport streaming', () => {
+  it('forwards output chunks while still buffering them', async () => {
+    const { spawnFn } = createFakeSpawn({
+      stdout: 'first\n',
+      stderr: 'oops\n',
+    });
+    const transport = new LocalTransport('local', spawnFn);
+    const out: string[] = [];
+    const err: string[] = [];
+
+    const result = await transport.exec('docker', ['logs'], {
+      onStdout: (chunk) => out.push(chunk),
+      onStderr: (chunk) => err.push(chunk),
+    });
+
+    expect(out.join('')).toBe('first\n');
+    expect(err.join('')).toBe('oops\n');
+    expect(result.stdout).toBe('first\n');
   });
 });

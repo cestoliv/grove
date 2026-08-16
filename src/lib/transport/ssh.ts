@@ -123,6 +123,8 @@ export class SshTransport implements Transport {
       {
         stdin: options.stdin,
         timeoutMs: options.timeoutMs,
+        onStdout: options.onStdout,
+        onStderr: options.onStderr,
       },
     );
   }

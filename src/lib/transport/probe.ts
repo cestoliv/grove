@@ -1,3 +1,4 @@
+import { errorMessage } from '../errors.js';
 import type { Transport } from './types.js';
 
 export const PROBE_TIMEOUT_MS = 10_000;
@@ -48,17 +49,6 @@ export async function probeHost(
       arch: machine === undefined ? undefined : normalizeArch(machine),
     };
   } catch (error) {
-    return { host: name, reachable: false, reason: (error as Error).message };
+    return { host: name, reachable: false, reason: errorMessage(error) };
   }
-}
-
-export async function probeHosts(
-  transports: ReadonlyMap<string, Transport>,
-  timeoutMs = PROBE_TIMEOUT_MS,
-): Promise<HostProbe[]> {
-  return Promise.all(
-    [...transports].map(([name, transport]) =>
-      probeHost(name, transport, timeoutMs),
-    ),
-  );
 }

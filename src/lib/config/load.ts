@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
+import { errorMessage } from '../errors.js';
 import { detectLiteralTokens } from './credentials.js';
 import { ConfigError, type ConfigIssue, issuesFromZod } from './errors.js';
 import { interpolateEnv } from './interpolate.js';
@@ -42,7 +43,7 @@ export async function loadConfig(
     const message =
       code === 'ENOENT'
         ? `no config file at ${configPath}. Create grove.yaml, or point --config or GROVE_CONFIG at one.`
-        : `cannot read ${configPath}: ${(error as Error).message}`;
+        : `cannot read ${configPath}: ${errorMessage(error)}`;
     return fail([{ path: '<file>', message }], configPath);
   }
 
@@ -50,10 +51,7 @@ export async function loadConfig(
   try {
     document = parseYaml(text);
   } catch (error) {
-    return fail(
-      [{ path: '<yaml>', message: (error as Error).message }],
-      configPath,
-    );
+    return fail([{ path: '<yaml>', message: errorMessage(error) }], configPath);
   }
 
   if (
