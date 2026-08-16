@@ -1,0 +1,65 @@
+# grove.example.yaml
+# Copy this to grove.yaml and edit it. grove reads ./grove.yaml by default,
+# or the path in --config or GROVE_CONFIG.
+
+# How often the daemon checks the fleet. Milestone 1 parses these and does
+# not yet act on them.
+tick: { fast: 2m, full: 30m }
+
+# Hosts that run runners. The control node itself is type: local. Every other
+# host is type: ssh and is addressed by a ~/.ssh/config alias, so jump hosts,
+# users and keys keep working the way they already do.
+hosts:
+  mac:
+    type: local
+    work_root: /Volumes/ci/grove
+  atlas:
+    type: ssh
+    host: atlas
+    work_root: /PROD/local/grove
+
+# Forges grove registers runners against. A credential is never a literal.
+# Use ${ENV_VAR}, use command:, or leave auth out to delegate to gh or glab.
+forges:
+  gh-overload:
+    kind: github
+    auth: { token: "${GH_TOKEN}" }
+  gl-chevro:
+    kind: gitlab
+    url: https://git.chevro.fr
+    auth: { command: "op read op://infra/gitlab/pat" }
+
+# Groups of identical runners. Every group names a forge, a scope, and a
+# placement. placement takes { host: <name>, count: <n> } or a { <host>: <n> }
+# map that spans hosts.
+groups:
+  - name: overload-arm
+    forge: gh-overload
+    scope: { level: organization, target: Overload-coach }
+    placement: { host: mac, count: 2 }
+    stack: docker
+    arch: arm64
+    labels: [arm64]              # GitHub speaks labels
+    build: ./runners/Dockerfile
+
+  - name: chevro-dind
+    forge: gl-chevro
+    scope: { level: instance }
+    placement: { atlas: 3 }
+    stack: docker
+    arch: amd64
+    tags: [docker, dind]         # GitLab speaks tags
+    image: gitlab/gitlab-runner:latest
+    privileged: true
+    volumes: ["/cache", "/var/run/docker.sock:/var/run/docker.sock"]
+    concurrent: 4
+
+  - name: ios
+    forge: gh-overload
+    scope: { level: organization, target: Overload-coach }
+    placement: { host: mac, count: 1 }
+    stack: native
+    labels: [macos, xcode]
+    work_root: ~/ci/ios          # this group overrides the host default
+    max_job_duration: 90m
+    max_work_size: 120G
