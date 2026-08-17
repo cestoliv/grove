@@ -77,6 +77,7 @@ groups:
     stack: native                # a process on the host, no container
     labels: [macos, xcode]
     work_root: ~/ci/ios          # this group overrides the host default
+    install_root: ~/ci/runners   # native only, and the runner lives here
     max_job_duration: 90m
     max_work_size: 120G
     raw:

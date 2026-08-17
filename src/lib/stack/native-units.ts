@@ -37,6 +37,13 @@ export function launchctlBootoutArgs(uid: string, label: string): string[] {
   return ['bootout', `gui/${uid}/${label}`];
 }
 
+// The one question launchd answers about a label without changing anything.
+// It exits non-zero when the label is not loaded in the domain, which is how
+// grove tells a finished bootout from one launchd is still working through.
+export function launchctlPrintArgs(uid: string, label: string): string[] {
+  return ['print', `gui/${uid}/${label}`];
+}
+
 // `-k` restarts a job that is already running, which is what a start wants.
 // A create has just bootstrapped the job and RunAtLoad started it, so asking
 // for a restart there would SIGKILL a runner that is milliseconds old and can

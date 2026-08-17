@@ -1,9 +1,29 @@
 import { formatBytes } from '../bytes.js';
 import { checkWorkRootVolume } from '../stack/index.js';
-import type { HostCheckContext } from './host-context.js';
+import type { HostCheckContext, WorkRootTarget } from './host-context.js';
 import { type Check, type CheckResult, fail, ok, skip, warn } from './types.js';
 
 const NO_GROUP = 'no group is placed on this host';
+
+// What the operator calls the path, and the key that put it there. An install
+// root is only ever the second one, and it reads the same host the same way.
+function noun(target: WorkRootTarget): string {
+  return target.kind === 'install' ? 'install root' : 'work root';
+}
+
+function key(target: WorkRootTarget): string {
+  return target.kind === 'install' ? 'install_root' : 'work_root';
+}
+
+// Both roots the host has to hold, in one list, so a check written once
+// covers a group that installs its runner off its work root.
+async function roots(context: HostCheckContext): Promise<WorkRootTarget[]> {
+  const [work, install] = await Promise.all([
+    context.workRoots(),
+    context.installRoots(),
+  ]);
+  return [...work, ...install];
+}
 
 function exists(
   context: HostCheckContext,
@@ -19,19 +39,19 @@ function exists(
 export const workRootExistsCheck: Check<HostCheckContext> = {
   id: 'host.work-root-exists',
   async run(context) {
-    const roots = await context.workRoots();
-    if (roots.length === 0) {
+    const targets = await roots(context);
+    if (targets.length === 0) {
       return [skip(NO_GROUP)];
     }
     const results: CheckResult[] = [];
-    for (const target of roots) {
+    for (const target of targets) {
       const test = await exists(context, target.root);
       results.push(
         test.code === 0
-          ? ok('the work root is a directory', { subject: target.root })
+          ? ok(`the ${noun(target)} is a directory`, { subject: target.root })
           : fail(
-              'the work root is not there',
-              `Create it on the host with \`mkdir -p ${target.root}\`, or mount the volume that holds it. grove never creates a work root or a mount point itself, because \`mkdir -p\` on an absent mount point silently writes to the boot disk.`,
+              `the ${noun(target)} is not there`,
+              `Create it on the host with \`mkdir -p ${target.root}\`, or mount the volume that holds it. grove never creates a ${noun(target)} or a mount point itself, because \`mkdir -p\` on an absent mount point silently writes to the boot disk.`,
               {
                 subject: target.root,
                 detail: `used by ${target.groups.join(', ')}`,
@@ -46,26 +66,26 @@ export const workRootExistsCheck: Check<HostCheckContext> = {
 export const workRootWritableCheck: Check<HostCheckContext> = {
   id: 'host.work-root-writable',
   async run(context) {
-    const roots = await context.workRoots();
-    if (roots.length === 0) {
+    const targets = await roots(context);
+    if (targets.length === 0) {
       return [skip(NO_GROUP)];
     }
     const results: CheckResult[] = [];
-    for (const target of roots) {
+    for (const target of targets) {
       const present = await exists(context, target.root);
       if (present.code !== 0) {
         results.push(
-          skip('the work root is not there', { subject: target.root }),
+          skip(`the ${noun(target)} is not there`, { subject: target.root }),
         );
         continue;
       }
       const test = await context.transport.exec('test', ['-w', target.root]);
       results.push(
         test.code === 0
-          ? ok('the work root is writable', { subject: target.root })
+          ? ok(`the ${noun(target)} is writable`, { subject: target.root })
           : fail(
-              'the work root is not writable by this user',
-              `Run \`sudo chown -R "$(id -un)" ${target.root}\` on the host, or point work_root somewhere the SSH user owns. grove creates each seat's directory under this root, so it needs to write here.`,
+              `the ${noun(target)} is not writable by this user`,
+              `Run \`sudo chown -R "$(id -un)" ${target.root}\` on the host, or point ${key(target)} somewhere the SSH user owns. grove creates each seat's directory under this root, so it needs to write here.`,
               { subject: target.root },
             ),
       );
@@ -77,13 +97,13 @@ export const workRootWritableCheck: Check<HostCheckContext> = {
 export const workRootVolumeCheck: Check<HostCheckContext> = {
   id: 'host.work-root-volume',
   async run(context) {
-    const roots = await context.workRoots();
-    if (roots.length === 0) {
+    const targets = await roots(context);
+    if (targets.length === 0) {
       return [skip(NO_GROUP)];
     }
     const probe = await context.probe();
     const results: CheckResult[] = [];
-    for (const target of roots) {
+    for (const target of targets) {
       // The same function the fast tick runs before every start, so a work
       // root doctor passes is one the daemon will start a runner on.
       const check = await checkWorkRootVolume(
@@ -94,7 +114,7 @@ export const workRootVolumeCheck: Check<HostCheckContext> = {
       if (!check.guarded) {
         results.push(
           skip(
-            'the work root is not under /Volumes, /mnt or /media, so an absent mount cannot be mistaken for it',
+            `the ${noun(target)} is not under /Volumes, /mnt or /media, so an absent mount cannot be mistaken for it`,
             { subject: target.root },
           ),
         );
@@ -110,8 +130,9 @@ export const workRootVolumeCheck: Check<HostCheckContext> = {
       }
       results.push(
         fail(
-          check.reason ?? 'the work root may have fallen back to the boot disk',
-          `Mount the disk at ${check.mountPoint}, or point work_root at a path on a disk that is already there. grove refuses to start a runner whose work root fell back to the boot volume, so this blocks the group rather than quietly filling the internal SSD.`,
+          check.reason ??
+            `the ${noun(target)} may have fallen back to the boot disk`,
+          `Mount the disk at ${check.mountPoint}, or point ${key(target)} at a path on a disk that is already there. grove refuses to start a runner whose work root fell back to the boot volume, so this blocks the group rather than quietly filling the internal SSD.`,
           { subject: target.root },
         ),
       );

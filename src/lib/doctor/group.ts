@@ -2,6 +2,7 @@ import { formatBytes } from '../bytes.js';
 import {
   archWarnings,
   type ConfigWarning,
+  dockerOptionWarnings,
   type GroveConfig,
   nativeOptionWarnings,
   privilegedSocketWarnings,
@@ -54,6 +55,8 @@ export const WARNING_FIXES: Record<WarningCode, string> = {
     'Check the key against the ones this stack reads. grove passes raw through without interpreting it, so a misspelled key is silently dropped rather than rejected.',
   'native-unused-option':
     'Drop the key, or move the group to stack: docker. A native group runs the runner as a process on the host, so nothing about a container applies to it.',
+  'docker-unused-option':
+    'Drop the key, or move the group to stack: native. A Docker group runs the runner in a container, so nothing about a host install applies to it.',
 };
 
 const MANAGED_PLATFORMS = ['darwin', 'linux'];
@@ -111,15 +114,26 @@ export function runGroupChecks(context: GroupCheckContext): CheckReport[] {
   const reports: CheckReport[] = [];
 
   const archByHost = new Map<string, string>();
+  const platformByHost = new Map<string, string>();
   for (const fact of facts.values()) {
-    if (fact.reachable && fact.arch !== undefined) {
+    if (!fact.reachable) {
+      continue;
+    }
+    if (fact.arch !== undefined) {
       archByHost.set(fact.host, fact.arch);
+    }
+    if (fact.platform !== undefined) {
+      platformByHost.set(fact.host, fact.platform);
     }
   }
 
   const privileged = warningsById(privilegedSocketWarnings(config), config);
-  const arch = warningsById(archWarnings(config, archByHost), config);
+  const arch = warningsById(
+    archWarnings(config, archByHost, platformByHost),
+    config,
+  );
   const nativeOptions = warningsById(nativeOptionWarnings(config), config);
+  const dockerOptions = warningsById(dockerOptionWarnings(config), config);
   let raw: Map<string, ConfigWarning[]>;
   let rawError: string | undefined;
   try {
@@ -175,7 +189,21 @@ export function runGroupChecks(context: GroupCheckContext): CheckReport[] {
     if (group.stack !== 'native') {
       push('group.native-forge', skip('the group runs on Docker'));
       push('group.native-platform', skip('the group runs on Docker'));
-      push('group.native-option', skip('the group runs on Docker'));
+      // The mirror of the native reading of this check. install_root
+      // describes where a host install goes, and a container has none.
+      const strayed = dockerOptions.get(group.name) ?? [];
+      if (strayed.length === 0) {
+        push('group.native-option', skip('the group runs on Docker'));
+      } else {
+        for (const finding of strayed) {
+          push(
+            'group.native-option',
+            warn(finding.message, WARNING_FIXES['docker-unused-option'], {
+              subject: finding.path,
+            }),
+          );
+        }
+      }
     } else {
       const kind = config.forges[group.forge]?.kind;
       push(

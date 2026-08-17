@@ -89,6 +89,7 @@ export {
   launchctlBootoutArgs,
   launchctlBootstrapArgs,
   launchctlKickstartArgs,
+  launchctlPrintArgs,
   parseLaunchctlList,
   parseSystemctlList,
   SYSTEMCTL_LIST_ARGS,

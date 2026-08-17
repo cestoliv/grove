@@ -15,6 +15,7 @@ import {
 } from './schema.js';
 import {
   type ConfigWarning,
+  dockerOptionWarnings,
   nativeOptionWarnings,
   privilegedSocketWarnings,
 } from './warnings.js';
@@ -139,6 +140,7 @@ export async function loadConfig(
     warnings: [
       ...privilegedSocketWarnings(config),
       ...nativeOptionWarnings(config),
+      ...dockerOptionWarnings(config),
     ],
   };
 }

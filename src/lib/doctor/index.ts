@@ -50,7 +50,9 @@ export {
   type HostCheckContext,
   type HostContextInput,
   type HostFacts,
+  hostInstallRoots,
   hostWorkRoots,
+  type RootKind,
   type WorkRootTarget,
 } from './host-context.js';
 export { DOCKER_HOST_CHECKS } from './host-docker.js';

@@ -83,6 +83,33 @@ describe('buildNativeTarget', () => {
     expect(target.workDir).toBe('/Users/olivier/ci/ios/ios-1');
     expect(target.installDir).toBe('/Users/olivier/ci/ios/ios-1-runner');
   });
+
+  it('puts the install dir under install_root and leaves the work dir alone', () => {
+    const target = buildNativeTarget({
+      group: group({ work_root: '/Volumes/ci/ios', install_root: '/opt/ci' }),
+      host,
+      index: 1,
+      home: '/Users/olivier',
+    });
+    expect(target.workDir).toBe('/Volumes/ci/ios/ios-1');
+    expect(target.installDir).toBe('/opt/ci/ios-1-runner');
+    expect(target.serviceScript).toBe('/opt/ci/ios-1-runner/bin/runsvc.sh');
+    expect(target.stdoutPath).toBe('/opt/ci/ios-1-runner/stdout.log');
+    expect(target.diagDir).toBe('/opt/ci/ios-1-runner/_diag');
+    // The cache root still follows the work root, because install_root moves
+    // the runner and nothing else.
+    expect(target.cacheDir).toBe('/Volumes/ci/ios-cache/ios-1');
+  });
+
+  it('expands a tilde in install_root against the runner home', () => {
+    const target = buildNativeTarget({
+      group: group({ install_root: '~/runners' }),
+      host,
+      index: 1,
+      home: '/Users/olivier',
+    });
+    expect(target.installDir).toBe('/Users/olivier/runners/ios-1-runner');
+  });
 });
 
 describe('nativeTargetFromDirs', () => {

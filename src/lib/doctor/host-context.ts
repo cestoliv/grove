@@ -1,5 +1,5 @@
 import type { GroupConfig, GroveConfig, HostConfig } from '../config/index.js';
-import { resolveWorkRoot } from '../naming.js';
+import { resolveInstallRoot, resolveWorkRoot } from '../naming.js';
 import { expandHome } from '../paths.js';
 import { HOME_COMMAND } from '../reconcile/index.js';
 import {
@@ -18,9 +18,14 @@ import {
 } from '../transport/index.js';
 import { type DiskUsage, dfArgs, parseDf } from './disk.js';
 
+// Which key put the path here. The three root checks read the same host the
+// same way for both, and only the words they use differ.
+export type RootKind = 'work' | 'install';
+
 export interface WorkRootTarget {
   root: string;
   groups: string[];
+  kind: RootKind;
 }
 
 /**
@@ -59,6 +64,9 @@ export interface HostCheckContext {
   dockerServer(): Promise<ExecResult>;
   disk(root: string): Promise<DiskUsage | undefined>;
   workRoots(): Promise<WorkRootTarget[]>;
+  // Every distinct install root a native group places here, minus the ones a
+  // work root already covers. Empty unless a group sets install_root.
+  installRoots(): Promise<WorkRootTarget[]>;
   seats(): Promise<WorkDirTarget[]>;
   // The image store and the work dirs, in the two reads `status` makes.
   storage(): Promise<HostStorage>;
@@ -90,7 +98,45 @@ export function hostWorkRoots(
       continue;
     }
     const root = expandHome(resolveWorkRoot(hostConfig, group), env);
-    const target = byRoot.get(root) ?? { root, groups: [] };
+    const target = byRoot.get(root) ?? { root, groups: [], kind: 'work' };
+    target.groups.push(group.name);
+    byRoot.set(root, target);
+  }
+  return [...byRoot.values()];
+}
+
+/**
+ * The install roots the host also has to hold. A native group that names no
+ * install_root installs under its work root, which the work-root targets
+ * already carry, so only a group that moved its install off the work root
+ * shows up here. That is the macOS case: launchd refuses to execute a program
+ * on an external volume, so the runner lives on the boot disk while the work
+ * dir stays on the big one.
+ */
+export function hostInstallRoots(
+  config: GroveConfig,
+  host: string,
+  home?: string,
+): WorkRootTarget[] {
+  const hostConfig = config.hosts[host];
+  if (hostConfig === undefined) {
+    return [];
+  }
+  const env =
+    home === undefined ? undefined : ({ HOME: home } as NodeJS.ProcessEnv);
+  const covered = new Set(
+    hostWorkRoots(config, host, home).map((target) => target.root),
+  );
+  const byRoot = new Map<string, WorkRootTarget>();
+  for (const group of config.groups) {
+    if (group.placement[host] === undefined || group.stack !== 'native') {
+      continue;
+    }
+    const root = expandHome(resolveInstallRoot(hostConfig, group), env);
+    if (covered.has(root)) {
+      continue;
+    }
+    const target = byRoot.get(root) ?? { root, groups: [], kind: 'install' };
     target.groups.push(group.name);
     byRoot.set(root, target);
   }
@@ -195,6 +241,8 @@ export function createHostContext(input: HostContextInput): HostCheckContext {
         }
       }),
     workRoots: async () => hostWorkRoots(config, host, await context.home()),
+    installRoots: async () =>
+      hostInstallRoots(config, host, await context.home()),
     seats: async () => seatWorkDirTargets(config, host, await context.home()),
     storage: () =>
       once('storage', async () => {

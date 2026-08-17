@@ -244,6 +244,7 @@ describe('groupSchema', () => {
       labels: ['macos', 'xcode'],
       work_root: '~/ci/ios',
       cache_root: '~/ci/cache',
+      install_root: '~/ci/runners',
       max_job_duration: '90m',
       drain_timeout: '5m',
       max_work_size: '120G',
@@ -256,6 +257,17 @@ describe('groupSchema', () => {
     expect(group.max_work_size).toBe(120 * 1024 ** 3);
     expect(group.labels).toEqual(['macos', 'xcode']);
     expect(group.pull_policy).toBe('always');
+    expect(group.install_root).toBe('~/ci/runners');
+  });
+
+  it('leaves install_root absent when the group names none', () => {
+    expect(groupSchema.parse(base).install_root).toBeUndefined();
+  });
+
+  it('rejects an empty install_root', () => {
+    expect(groupSchema.safeParse({ ...base, install_root: '' }).success).toBe(
+      false,
+    );
   });
 
   it('keeps the docker keys the spec names', () => {

@@ -4,7 +4,8 @@ export type WarningCode =
   | 'privileged-docker-socket'
   | 'arch-mismatch'
   | 'raw-unused'
-  | 'native-unused-option';
+  | 'native-unused-option'
+  | 'docker-unused-option';
 
 export interface ConfigWarning {
   code: WarningCode;
@@ -44,9 +45,28 @@ export function privilegedSocketWarnings(config: GroveConfig): ConfigWarning[] {
   return warnings;
 }
 
+// An amd64 container on an Apple Silicon Mac is the ordinary case rather than
+// a mistake: Rosetta sits under Docker Desktop and OrbStack, every image that
+// ships no arm64 tag runs that way, and the operator asked for it on purpose.
+// Every other mismatch is still worth a word, including a native group, whose
+// runner is a host process with no emulation under it.
+function emulatedOnDarwin(
+  group: { arch?: string; stack: string },
+  platform: string | undefined,
+  reported: string,
+): boolean {
+  return (
+    group.stack === 'docker' &&
+    group.arch === 'amd64' &&
+    reported === 'arm64' &&
+    (platform ?? '').trim().toLowerCase() === 'darwin'
+  );
+}
+
 export function archWarnings(
   config: GroveConfig,
   hostArch: ReadonlyMap<string, string>,
+  hostPlatform: ReadonlyMap<string, string> = new Map(),
 ): ConfigWarning[] {
   const warnings: ConfigWarning[] = [];
   for (const [index, group] of config.groups.entries()) {
@@ -56,6 +76,9 @@ export function archWarnings(
     for (const host of Object.keys(group.placement)) {
       const reported = hostArch.get(host);
       if (reported === undefined || reported === group.arch) {
+        continue;
+      }
+      if (emulatedOnDarwin(group, hostPlatform.get(host), reported)) {
         continue;
       }
       warnings.push({
@@ -95,6 +118,31 @@ export function nativeOptionWarnings(config: GroveConfig): ConfigWarning[] {
         code: 'native-unused-option',
         path: `groups[${index}].${key}`,
         message: `group "${group.name}" runs on the host itself, so grove reads no ${key}. Drop the key, or move the group to stack: docker. grove proceeds anyway.`,
+      });
+    }
+  }
+  return warnings;
+}
+
+// The mirror of NATIVE_UNUSED_KEYS. These keys describe a native seat, and a
+// Docker group that sets one has spent an afternoon on something grove reads
+// nowhere.
+export const DOCKER_UNUSED_KEYS = ['install_root'] as const;
+
+export function dockerOptionWarnings(config: GroveConfig): ConfigWarning[] {
+  const warnings: ConfigWarning[] = [];
+  for (const [index, group] of config.groups.entries()) {
+    if (group.stack !== 'docker') {
+      continue;
+    }
+    for (const key of DOCKER_UNUSED_KEYS) {
+      if (group[key] === undefined) {
+        continue;
+      }
+      warnings.push({
+        code: 'docker-unused-option',
+        path: `groups[${index}].${key}`,
+        message: `group "${group.name}" runs in a container, so grove reads no ${key}. Drop the key, or move the group to stack: native. grove proceeds anyway.`,
       });
     }
   }

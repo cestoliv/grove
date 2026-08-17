@@ -61,6 +61,8 @@ export {
   archWarnings,
   type ConfigWarning,
   DOCKER_SOCKET_PATH,
+  DOCKER_UNUSED_KEYS,
+  dockerOptionWarnings,
   NATIVE_UNUSED_KEYS,
   nativeOptionWarnings,
   privilegedSocketWarnings,
