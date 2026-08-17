@@ -177,8 +177,19 @@ export function buildEntrypointCommand(spec: RunnerSpec): string {
   if (spec.labels.length > 0) {
     parts.push('--labels', shellQuote(spec.labels.join(',')));
   }
+  // The command is the container's command, so `docker start` on a stopped
+  // seat runs it again. config.sh writes .runner and .credentials into the
+  // runner root, which is this working directory and part of the container
+  // rather than of a bind mount, so their presence is exactly the question
+  // "has this container already registered?". Configuring only when .runner
+  // is absent makes a restart reuse the stored credentials, which is what
+  // run.sh needs: the registration token in this command expires within the
+  // hour, and a runner that re-ran config.sh would answer "Cannot configure
+  // the runner because it is already configured" and exit non-zero anyway.
+  // A recreated container starts from a fresh layer, so it configures.
+  const configure = `if [ ! -f .runner ]; then ${parts.join(' ')}; fi`;
   // Persistent by default, so caches stay warm. No --ephemeral.
-  return `${parts.join(' ')} && ./run.sh`;
+  return `${configure} && ./run.sh`;
 }
 
 export function buildRunArgs(spec: RunnerSpec): string[] {
