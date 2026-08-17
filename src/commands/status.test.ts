@@ -201,3 +201,44 @@ describe('runStatus and the daemon', () => {
     ]);
   });
 });
+
+describe('runStatus, storage', () => {
+  function measurable(): FakeTransport {
+    return mac()
+      .on('docker system df', { stdout: 'Images\t4GB\t1GB (25%)\n' })
+      .on('sh -c set --', { stdout: 'grove-overload-arm-1\t2048\n' });
+  }
+
+  it('measures every reachable host and prints the section', async () => {
+    const out: string[] = [];
+    const code = await runStatus(
+      options({
+        connect: () => measurable(),
+        stdout: (text: string) => out.push(text),
+      }),
+    );
+
+    expect(code).toBe(EXIT_OK);
+    expect(out.join('\n')).toContain('Storage');
+    // docker counts in decimal units and grove prints binary ones, so its
+    // 4GB image store is 3.7 GiB.
+    expect(out.join('\n')).toContain('3.7 GiB');
+  });
+
+  it('carries the storage through --json', async () => {
+    const out: string[] = [];
+    await runStatus(
+      options({
+        connect: () => measurable(),
+        json: true,
+        stdout: (text: string) => out.push(text),
+      }),
+    );
+
+    const parsed = JSON.parse(out.join('\n')) as {
+      storage: Array<{ host: string; workDirBytes: number }>;
+    };
+    expect(parsed.storage[0].host).toBe('mac');
+    expect(parsed.storage[0].workDirBytes).toBe(2048 * 1024);
+  });
+});

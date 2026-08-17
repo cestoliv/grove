@@ -40,6 +40,9 @@ export interface FleetContext {
   stacks: Map<string, DockerStack>;
   store: StateStore;
   forgeLimit: Limiter;
+  // The control node's own transport. A `command:` credential runs here and
+  // never over SSH, and doctor asks this machine about ssh, gh and glab.
+  localTransport: Transport;
   // One lookup of the latest actions/runner release for the whole run.
   runnerVersion: RunnerVersionResolver;
   close(): Promise<void>;
@@ -177,6 +180,7 @@ export async function openFleet(
     loaded,
     rawWarnings,
     transports,
+    localTransport,
     forgeClients,
     stacks,
     store,

@@ -28,9 +28,14 @@ export {
   DEFAULT_GITLAB_RUNNER_IMAGE,
   GITLAB_CONFIG_DIR,
   GITLAB_CONFIG_FILE,
+  GITLAB_RUNNER_METRICS_PORT,
   GITLAB_SYSTEM_ID_FILE,
   type GitlabRunnerSpec,
   gitlabSystemIdPath,
+  groupMetricsPort,
+  groupSeatCount,
+  MAX_PORT,
+  metricsPortRangeError,
   RAW_GITLAB_KEYS,
   type RawGitlabOptions,
   rawGitlabOptions,
@@ -88,6 +93,14 @@ export {
 } from './native-units.js';
 export { rawStackWarnings } from './raw-warnings.js';
 export {
+  DOCKER_DF_ARGS,
+  type DockerDiskUsage,
+  type HostStorage,
+  parseDockerDiskUsage,
+  parseDockerSize,
+  readHostStorage,
+} from './storage.js';
+export {
   type ContainerState,
   DEFAULT_DRAIN_TIMEOUT_MS,
   type DockerContainer,
@@ -95,6 +108,12 @@ export {
   type NativeUnitState,
   StackError,
 } from './types.js';
+export {
+  buildUsageScript,
+  parseUsage,
+  seatWorkDirTargets,
+  type WorkDirTarget,
+} from './usage.js';
 export {
   checkWorkRootVolume,
   GUARDED_MOUNT_PREFIXES,

@@ -624,7 +624,7 @@ describe('executeActions, a shared registration', () => {
       '--volume /PROD/local/grove/chevro-dind-1-config:/etc/gitlab-runner',
     );
     expect(run).toContain('gitlab-runner register');
-    expect(run).toContain("printf 'concurrent = %s\\n' '4'");
+    expect(run).toContain("printf '%s\\n' 'concurrent = 4'");
   });
 
   it('calls nothing at the forge for a second seat added later', async () => {

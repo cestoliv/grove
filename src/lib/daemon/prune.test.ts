@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { buildUsageScript, parseUsage } from '../stack/index.js';
 import { FakeTransport } from '../transport/index.js';
 import {
   buildEntriesScript,
   buildRemoveArgs,
-  buildUsageScript,
   parseEntries,
-  parseUsage,
   pruneWorkDirs,
   selectForRemoval,
 } from './prune.js';

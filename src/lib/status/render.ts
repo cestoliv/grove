@@ -1,4 +1,5 @@
 import pc from 'picocolors';
+import { formatBytes } from '../bytes.js';
 import { renderTable } from '../plan/render.js';
 import type { StatusReport } from './report.js';
 
@@ -79,6 +80,39 @@ export function renderStatusReport(
         entity.tags.join(','),
         `${entity.managers}/${entity.expected}`,
       ]),
+    )) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  if (report.storage.length > 0) {
+    lines.push('', 'Storage');
+    for (const line of renderTable(
+      ['HOST', 'IMAGES', 'RECLAIMABLE', 'WORK DIRS', 'NOTE'],
+      report.storage.map((host) => {
+        const largest = [...host.workDirs].sort(
+          (left, right) => right.bytes - left.bytes,
+        )[0];
+        const note =
+          host.dockerError ??
+          host.workDirError ??
+          (largest === undefined
+            ? 'no seat has a work dir on this host yet'
+            : `largest ${largest.name} at ${formatBytes(largest.bytes)}`);
+        return [
+          host.host,
+          host.docker === undefined
+            ? '-'
+            : formatBytes(host.docker.imagesBytes),
+          host.docker === undefined
+            ? '-'
+            : formatBytes(host.docker.imagesReclaimableBytes),
+          host.workDirBytes === undefined
+            ? '-'
+            : formatBytes(host.workDirBytes),
+          note,
+        ];
+      }),
     )) {
       lines.push(`  ${line}`);
     }

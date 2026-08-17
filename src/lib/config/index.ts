@@ -15,6 +15,13 @@ export {
 } from './errors.js';
 export { type InterpolationResult, interpolateEnv } from './interpolate.js';
 export {
+  isListen,
+  isLoopback,
+  LISTEN_HINT,
+  type ListenAddress,
+  parseListen,
+} from './listen.js';
+export {
   type LoadConfigOptions,
   type LoadedConfig,
   loadConfig,
@@ -27,6 +34,7 @@ export {
 export { validateReferences } from './references.js';
 export {
   DEFAULT_HISTORY_RETENTION_MS,
+  DEFAULT_METRICS_SCRAPE_CACHE_MS,
   DEFAULT_TICK,
   type ForgeAuth,
   type ForgeConfig,
@@ -41,6 +49,8 @@ export {
   type HostConfig,
   historySchema,
   type Level,
+  type MetricsConfig,
+  metricsSchema,
   type Placement,
   type Scope,
   type StackKind,

@@ -48,11 +48,9 @@ export {
 export {
   buildEntriesScript,
   buildRemoveArgs,
-  buildUsageScript,
   type PruneResult,
   type PruneTarget,
   parseEntries,
-  parseUsage,
   pruneWorkDirs,
   selectForRemoval,
   type WorkEntry,

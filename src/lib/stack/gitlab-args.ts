@@ -1,4 +1,4 @@
-import type { GroupConfig } from '../config/index.js';
+import type { GroupConfig, GroveConfig } from '../config/index.js';
 import { DOCKER_SOCKET_PATH } from '../config/warnings.js';
 import { shellQuote } from '../transport/index.js';
 import {
@@ -29,8 +29,67 @@ export const RAW_GITLAB_KEYS = [
   'docker_run_args',
   'env',
   'job_image',
+  'metrics_port',
   'register_args',
 ];
+
+// The port gitlab-runner listens on inside the container once listen_address
+// is set. Fixed, because the host side is what the operator chooses.
+export const GITLAB_RUNNER_METRICS_PORT = 9252;
+
+/**
+ * The base port a group's seats publish gitlab-runner metrics on, or undefined
+ * when they publish none. Only a GitLab Docker group does: a GitHub Actions
+ * runner exposes no metrics endpoint at all, and a native seat has no
+ * container to publish a port from. One predicate, because the exporter's
+ * scrape, `grove doctor`'s port listing and its curl check all have to agree
+ * about which seats have a port at all.
+ */
+export function groupMetricsPort(
+  config: GroveConfig,
+  group: GroupConfig,
+): number | undefined {
+  const declared = group.raw?.metrics_port;
+  if (
+    typeof declared !== 'number' ||
+    group.stack !== 'docker' ||
+    config.forges[group.forge]?.kind !== 'gitlab'
+  ) {
+    return undefined;
+  }
+  return declared;
+}
+
+export const MAX_PORT = 65_535;
+
+/**
+ * The seats a group asks for, which is what decides how far its metrics ports
+ * count up from the base.
+ */
+export function groupSeatCount(group: GroupConfig): number {
+  return Object.values(group.placement).reduce((sum, count) => sum + count, 0);
+}
+
+/**
+ * Why a base metrics port and a seat count do not fit the port range, or
+ * undefined when they do. One predicate, because `rawGitlabOptions` throws on
+ * it and `grove doctor`'s `group.metrics-port` reports it, and two checks on
+ * one target disagreeing is what an operator stops reading at.
+ */
+export function metricsPortRangeError(
+  base: number,
+  seats: number,
+): string | undefined {
+  if (!Number.isInteger(base) || base < 1 || base > MAX_PORT) {
+    return `raw.metrics_port is ${base}, which is not a port number between 1 and ${MAX_PORT}`;
+  }
+  // Seat n takes base + n - 1, so the last seat is the one that overflows.
+  const last = base + Math.max(seats, 1) - 1;
+  if (last > MAX_PORT) {
+    return `raw.metrics_port ${base} gives the last of ${seats} seats port ${last}, above ${MAX_PORT}`;
+  }
+  return undefined;
+}
 
 // grove speaks always, missing and never. gitlab-runner spells the middle
 // one differently, and nothing else differs.
@@ -49,17 +108,22 @@ export interface RawGitlabOptions {
   runArgs: string[];
   registerArgs: string[];
   jobImage?: string;
+  // The host port this group's first seat publishes gitlab-runner's own
+  // /metrics on. Seat n takes metricsPort + n - 1.
+  metricsPort?: number;
   unknownKeys: string[];
 }
 
 export function rawGitlabOptions(
   raw?: Record<string, unknown>,
+  seats = 1,
 ): RawGitlabOptions {
   const env: Record<string, string> = {};
   const runArgs: string[] = [];
   const registerArgs: string[] = [];
   const unknownKeys: string[] = [];
   let jobImage: string | undefined;
+  let metricsPort: number | undefined;
 
   for (const [key, value] of Object.entries(raw ?? {})) {
     if (key === 'docker_run_args') {
@@ -77,6 +141,19 @@ export function rawGitlabOptions(
       jobImage = value;
       continue;
     }
+    if (key === 'metrics_port') {
+      if (typeof value !== 'number') {
+        throw new Error(
+          'raw.metrics_port must be a port number, for example 9252',
+        );
+      }
+      const problem = metricsPortRangeError(value, seats);
+      if (problem !== undefined) {
+        throw new Error(problem);
+      }
+      metricsPort = value;
+      continue;
+    }
     if (key === 'env') {
       Object.assign(env, envMap(key, value));
       continue;
@@ -89,6 +166,7 @@ export function rawGitlabOptions(
     runArgs,
     registerArgs,
     ...(jobImage === undefined ? {} : { jobImage }),
+    ...(metricsPort === undefined ? {} : { metricsPort }),
     unknownKeys,
   };
 }
@@ -110,6 +188,9 @@ export interface GitlabRunnerSpec extends RunnerDirs {
   dockerVolumes: string[];
   concurrent?: number;
   limit?: number;
+  // The host port this seat publishes gitlab-runner's /metrics on. Already
+  // offset by the seat's index, so it is the port and not the group's base.
+  metricsPort?: number;
   env: Record<string, string>;
   extraRunArgs: string[];
   extraRegisterArgs: string[];
@@ -129,6 +210,8 @@ export function buildGitlabRunnerSpec(
 ): GitlabRunnerSpec {
   const { group, registration } = input;
   const dirs = buildRunnerDirs(input);
+  // Seat count validation belongs to the config layer, which rejects an
+  // overflowing range before a spec is ever built. See `rawStackWarnings`.
   const raw = rawGitlabOptions(group.raw);
 
   return {
@@ -152,6 +235,12 @@ export function buildGitlabRunnerSpec(
     ],
     ...(group.concurrent === undefined ? {} : { concurrent: group.concurrent }),
     ...(group.limit === undefined ? {} : { limit: group.limit }),
+    // Seat n takes the group's base port plus n - 1, so a group of three
+    // starting at 9252 takes 9252, 9253 and 9254 wherever its seats are
+    // placed. Doctor warns when two groups on one host overlap.
+    ...(raw.metricsPort === undefined
+      ? {}
+      : { metricsPort: raw.metricsPort + input.index - 1 }),
     env: raw.env,
     extraRunArgs: raw.runArgs,
     extraRegisterArgs: raw.registerArgs,
@@ -199,12 +288,19 @@ export function buildGitlabEntrypointCommand(spec: GitlabRunnerSpec): string {
   // keeps that half written config from wedging the runner unregistered.
   const guard = `if ! grep -q ${shellQuote(REGISTERED_MARKER)} ${config} 2>/dev/null; then`;
   const lines = ['set -e', guard];
+  // Global keys have no flag and no environment variable, so they are written
+  // before register runs and register merges its own section underneath. One
+  // write, because a second redirection would truncate the first.
+  const globals: string[] = [];
   if (spec.concurrent !== undefined) {
-    // concurrent is a global key with no flag and no environment variable.
-    // Writing it before register runs lets register merge its own section
-    // underneath, which is the only way to set it without an interactive step.
+    globals.push(`concurrent = ${spec.concurrent}`);
+  }
+  if (spec.metricsPort !== undefined) {
+    globals.push(`listen_address = ":${GITLAB_RUNNER_METRICS_PORT}"`);
+  }
+  if (globals.length > 0) {
     lines.push(
-      `  printf 'concurrent = %s\\n' ${shellQuote(String(spec.concurrent))} > ${config}`,
+      `  printf '%s\\n' ${globals.map(shellQuote).join(' ')} > ${config}`,
     );
   }
   // Removing what register wrote is what makes the next start retry instead
@@ -233,6 +329,14 @@ export function buildGitlabRunArgs(spec: GitlabRunnerSpec): string[] {
     '--label',
     `grove.index=${spec.index}`,
   ];
+  if (spec.metricsPort !== undefined) {
+    // Loopback on the host, never 0.0.0.0. grove scrapes it over the same
+    // transport every tick uses, so the port never has to leave the machine.
+    args.push(
+      '--publish',
+      `127.0.0.1:${spec.metricsPort}:${GITLAB_RUNNER_METRICS_PORT}`,
+    );
+  }
   if (spec.arch !== undefined) {
     args.push('--platform', `linux/${spec.arch}`);
   }

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isListen, LISTEN_HINT } from './listen.js';
 import {
   DURATION_HINT,
   isDuration,
@@ -32,6 +33,16 @@ export const DEFAULT_HISTORY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 export const historySchema = z.strictObject({
   retention: durationSchema.optional(),
+});
+
+// How long one seat scrape is reused. Prometheus scrapes every 15 seconds by
+// default and two scrapers double that, so a short cache keeps the number of
+// curl calls proportional to time rather than to the number of scrapers.
+export const DEFAULT_METRICS_SCRAPE_CACHE_MS = 10_000;
+
+export const metricsSchema = z.strictObject({
+  listen: z.string().min(1).refine(isListen, { message: LISTEN_HINT }),
+  scrape_cache: durationSchema.optional(),
 });
 
 const localHostSchema = z.strictObject({
@@ -192,6 +203,7 @@ export const groupSchema = z.strictObject({
 export const configSchema = z.strictObject({
   tick: tickSchema.optional(),
   history: historySchema.optional(),
+  metrics: metricsSchema.optional(),
   hosts: z.record(z.string().min(1), hostSchema),
   forges: z.record(z.string().min(1), forgeSchema),
   groups: z.array(groupSchema).min(1, 'declare at least one group'),
@@ -203,11 +215,14 @@ export type Placement = Record<string, number>;
 export type GroupConfig = z.infer<typeof groupSchema>;
 export type StackKind = GroupConfig['stack'];
 export type HistoryConfig = { retentionMs: number };
+export type MetricsConfig = { listen: string; scrapeCacheMs: number };
 export type ParsedConfig = z.infer<typeof configSchema>;
-export type GroveConfig = Omit<ParsedConfig, 'tick' | 'history'> & {
+export type GroveConfig = Omit<ParsedConfig, 'tick' | 'history' | 'metrics'> & {
   tick: TickConfig;
   // The loader always fills this. It is optional on the type because every
   // fixture in the suite builds a GroveConfig by hand, and the one reader
   // falls back to the same default anyway.
   history?: HistoryConfig;
+  // Absent means the exporter is off, which is the default the spec sets.
+  metrics?: MetricsConfig;
 };

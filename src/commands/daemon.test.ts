@@ -7,6 +7,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { type AddressInfo, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -623,5 +624,174 @@ describe('runDaemonStatus', () => {
     // A node that will not answer is not a node with nothing installed.
     expect(out.join('\n')).toContain('(unknown)');
     expect(errors.join('\n')).toContain('could not resolve hostname');
+  });
+});
+
+describe('runDaemonRun, the exporter', () => {
+  // A port nothing holds, so the suite never fights whatever is on 9130. The
+  // config schema refuses port 0 on purpose, because an ephemeral port in a
+  // file nobody could point Prometheus at is always a mistake, so the test
+  // asks the kernel for one and writes that number.
+  async function metricsConfig(): Promise<string> {
+    const probe = createServer();
+    await new Promise<void>((resolve) => {
+      probe.listen(0, '127.0.0.1', resolve);
+    });
+    const { port } = probe.address() as AddressInfo;
+    await new Promise<void>((resolve) => {
+      probe.close(() => resolve());
+    });
+    return `${CONFIG}\nmetrics: { listen: "127.0.0.1:${port}" }\n`;
+  }
+
+  // Runs the daemon until its first tick, then stops it, and hands back what
+  // it wrote to grove.log and what the exporter answered while it was up.
+  async function runUntilFirstTick(
+    text: string,
+  ): Promise<{ log: string; body?: string; status?: number }> {
+    await writeFile(configPath, text, 'utf8');
+    const controller = new AbortController();
+    let body: string | undefined;
+    let status: number | undefined;
+
+    await runDaemonRun(
+      base({
+        store,
+        connect: () => new FakeTransport('mac'),
+        resolveToken: async () => 'token',
+        signal: controller.signal,
+        pid: 4242,
+        isPidAlive: () => false,
+        runTick: async (options: { kind: string }) => {
+          // The exporter is up by now, so this is the one moment a test can
+          // scrape it. The address is in the log line grove wrote.
+          const line = await readFile(join(stateDir, 'grove.log'), 'utf8');
+          const address = /metrics exporter listening on (\S+)/.exec(line)?.[1];
+          if (address !== undefined) {
+            const response = await fetch(`http://${address}/metrics`);
+            status = response.status;
+            body = await response.text();
+          }
+          controller.abort();
+          return summary(options.kind);
+        },
+      }),
+    );
+
+    return {
+      log: await readFile(join(stateDir, 'grove.log'), 'utf8'),
+      ...(body === undefined ? {} : { body }),
+      ...(status === undefined ? {} : { status }),
+    };
+  }
+
+  it('starts nothing when the config sets no metrics block', async () => {
+    const result = await runUntilFirstTick(CONFIG);
+    expect(result.log).not.toContain('metrics exporter listening');
+    expect(result.body).toBeUndefined();
+  });
+
+  it('serves grove metrics while the daemon runs', async () => {
+    const result = await runUntilFirstTick(await metricsConfig());
+    expect(result.log).toContain('metrics exporter listening on 127.0.0.1:');
+    expect(result.status).toBe(200);
+    expect(result.body).toContain('grove_up 1');
+  });
+
+  it('logs a bind failure and keeps the loop running', async () => {
+    // The probe keeps the port, so the address the config asks for is already
+    // taken and the exporter cannot have it.
+    const probe = createServer();
+    await new Promise<void>((resolve) => {
+      probe.listen(0, '127.0.0.1', resolve);
+    });
+    const { port } = probe.address() as AddressInfo;
+    try {
+      await writeFile(
+        configPath,
+        `${CONFIG}\nmetrics: { listen: "127.0.0.1:${port}" }\n`,
+        'utf8',
+      );
+      const controller = new AbortController();
+
+      const code = await runDaemonRun(
+        base({
+          store,
+          connect: () => new FakeTransport('mac'),
+          resolveToken: async () => 'token',
+          signal: controller.signal,
+          pid: 4242,
+          isPidAlive: () => false,
+          runTick: async (options: { kind: string }) => {
+            controller.abort();
+            return summary(options.kind);
+          },
+        }),
+      );
+
+      // A control loop that stops converging over a taken port is worse than
+      // one with no exporter, so the daemon ran, logged and exited clean.
+      expect(code).toBe(EXIT_OK);
+      const log = await readFile(join(stateDir, 'grove.log'), 'utf8');
+      expect(log).toContain('metrics exporter could not bind');
+      expect(log).not.toContain('metrics exporter listening');
+    } finally {
+      await new Promise<void>((resolve) => {
+        probe.close(() => resolve());
+      });
+    }
+  });
+
+  it('logs a taken address once rather than once per tick', async () => {
+    const probe = createServer();
+    await new Promise<void>((resolve) => {
+      probe.listen(0, '127.0.0.1', resolve);
+    });
+    const { port } = probe.address() as AddressInfo;
+    try {
+      await writeFile(
+        configPath,
+        `${FAST_CONFIG}\nmetrics: { listen: "127.0.0.1:${port}" }\n`,
+        'utf8',
+      );
+      const controller = new AbortController();
+      let ticks = 0;
+
+      const code = await runDaemonRun(
+        base({
+          store,
+          connect: () => new FakeTransport('mac'),
+          resolveToken: async () => 'token',
+          signal: controller.signal,
+          pid: 4242,
+          isPidAlive: () => false,
+          runTick: async (options: { kind: string }) => {
+            ticks += 1;
+            if (ticks >= 2) {
+              controller.abort();
+            }
+            return summary(options.kind);
+          },
+        }),
+      );
+
+      expect(code).toBe(EXIT_OK);
+      expect(ticks).toBeGreaterThanOrEqual(2);
+      // grove.log is the file an operator reads at 02:00, and a port taken for
+      // good would otherwise fill it with one line every fast tick.
+      const log = await readFile(join(stateDir, 'grove.log'), 'utf8');
+      expect(log.split('metrics exporter could not bind')).toHaveLength(2);
+    } finally {
+      await new Promise<void>((resolve) => {
+        probe.close(() => resolve());
+      });
+    }
+  });
+
+  it('stops the exporter when the daemon stops', async () => {
+    const result = await runUntilFirstTick(await metricsConfig());
+    const address = /metrics exporter listening on (\S+)/.exec(result.log)?.[1];
+    expect(address).toBeDefined();
+    await expect(fetch(`http://${address}/metrics`)).rejects.toThrow();
   });
 });

@@ -1,7 +1,11 @@
 import { ConfigError } from '../config/errors.js';
 import type { ConfigWarning, GroveConfig } from '../config/index.js';
 import { RAW_DOCKER_KEYS, rawDockerOptions } from './docker-args.js';
-import { RAW_GITLAB_KEYS, rawGitlabOptions } from './gitlab-args.js';
+import {
+  groupSeatCount,
+  RAW_GITLAB_KEYS,
+  rawGitlabOptions,
+} from './gitlab-args.js';
 import { RAW_NATIVE_KEYS, rawNativeOptions } from './native-args.js';
 
 // The key whose value made a raw block malformed, read back out of the
@@ -35,7 +39,7 @@ export function rawStackWarnings(config: GroveConfig): ConfigWarning[] {
       unknownKeys = native
         ? rawNativeOptions(group.raw).unknownKeys
         : gitlab
-          ? rawGitlabOptions(group.raw).unknownKeys
+          ? rawGitlabOptions(group.raw, groupSeatCount(group)).unknownKeys
           : rawDockerOptions(group.raw).unknownKeys;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

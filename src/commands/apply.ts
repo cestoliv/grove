@@ -1,3 +1,4 @@
+import { checkNewHosts, renderDoctorReport } from '../lib/doctor/index.js';
 import { EXIT_ABORTED, EXIT_OK, EXIT_UNREACHABLE } from '../lib/exit-codes.js';
 import { renderPlanReport } from '../lib/plan/render.js';
 import { isReport } from '../lib/reconcile/index.js';
@@ -15,6 +16,7 @@ export interface ApplyCommandOptions extends PlanCommandOptions {
   yes?: boolean;
   force?: boolean;
   clean?: boolean;
+  skipDoctor?: boolean;
   input?: NodeJS.ReadableStream;
   isTty?: boolean;
 }
@@ -50,6 +52,33 @@ export async function runApply(
     const fleet: FleetContext = opened;
 
     try {
+      // The spec runs host checks before the first apply against a new host.
+      // grove never provisions, so this is the one place it can still refuse
+      // to build on a host that cannot hold what it is about to be given.
+      if (options.skipDoctor !== true) {
+        const gate = await checkNewHosts({
+          fleet,
+          ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+        });
+        if (gate.report !== undefined && gate.checked.length > 0) {
+          write(
+            renderDoctorReport(gate.report, {
+              ...(options.color === undefined ? {} : { color: options.color }),
+            }),
+          );
+          write('');
+        }
+        // A dry run changes nothing, on the host or in the store, so it
+        // prints the findings and carries on to the plan, which is what the
+        // operator asked to see.
+        if (gate.blocked.length > 0 && options.dryRun !== true) {
+          writeError(
+            `grove has not checked ${gate.blocked.join(', ')} before, and the checks above failed. Fix them and run grove doctor, or pass --skip-doctor to apply anyway.`,
+          );
+          return EXIT_UNREACHABLE;
+        }
+      }
+
       const { observed, actions, report } = await planFleet(fleet, {
         ...options,
         recordSystemIds: true,

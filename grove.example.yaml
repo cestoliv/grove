@@ -12,6 +12,13 @@ tick: { fast: 2m, full: 30m }
 # grove.db. Pruned on the full tick. Defaults to 90d.
 history: { retention: 90d }
 
+# An optional Prometheus exporter, off unless listen is set. It binds exactly
+# what you name here, and doctor warns when that is not loopback: the endpoint
+# has no authentication and exposes group names, host names and job counts.
+# scrape_cache is how long one gitlab-runner scrape is reused, so two
+# Prometheus servers do not double the curl calls landing on your hosts.
+metrics: { listen: "127.0.0.1:9130", scrape_cache: 10s }
+
 # Hosts that run runners. The control node itself is type: local. Every other
 # host is type: ssh and is addressed by a ~/.ssh/config alias, so jump hosts,
 # users and keys keep working the way they already do.
@@ -61,6 +68,7 @@ groups:
     concurrent: 4
     raw:
       job_image: docker:27       # the image a job gets when it names none
+      metrics_port: 9252         # seat n publishes 127.0.0.1:(9252 + n - 1)
 
   - name: ios
     forge: gh-overload           # native runs on GitHub forges only

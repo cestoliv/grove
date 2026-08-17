@@ -4,6 +4,12 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openFleet } from '../../commands/context.js';
 import { FakeForgeClient } from '../forge/index.js';
+import {
+  META_LAST_FAST_TICK_MS,
+  META_LAST_FULL_TICK_MS,
+  type MetricsSnapshot,
+  MetricsState,
+} from '../metrics/index.js';
 import type { Action } from '../reconcile/index.js';
 import { StateStore } from '../state/index.js';
 import { FakeTransport } from '../transport/index.js';
@@ -633,5 +639,87 @@ describe('selectTickWork', () => {
     expect(
       selectTickWork('full', [create, start, report], supervision),
     ).toEqual([create, start, ...supervision]);
+  });
+});
+
+describe('runTick, feeding the exporter', () => {
+  function measurable(ps = ''): FakeTransport {
+    return mac(ps)
+      .on('docker system df', { stdout: 'Images\t2GB\t0B (0%)\n' })
+      .on('sh -c set --', { stdout: 'grove-overload-arm-1\t2048\n' });
+  }
+
+  it('publishes a snapshot the exporter can read', async () => {
+    const state = new MetricsState();
+    const fleet = await open(measurable());
+    try {
+      await runTick({ fleet, kind: 'full', log, metrics: state });
+
+      const snapshot = state.snapshot();
+      expect(snapshot?.hosts).toEqual([{ host: 'mac', reachable: true }]);
+      expect(snapshot?.expected).toEqual([
+        { group: 'overload-arm', host: 'mac', count: 1 },
+      ]);
+    } finally {
+      await fleet.close();
+    }
+  });
+
+  it('measures storage on a full tick and keeps the last measurement on a fast one', async () => {
+    const state = new MetricsState();
+    const fleet = await open(measurable());
+    try {
+      await runTick({ fleet, kind: 'full', log, metrics: state });
+      expect(state.storage()).toHaveLength(1);
+      expect(state.storage()[0].docker?.imagesBytes).toBe(2_000_000_000);
+
+      const measured = state.storage();
+      const first = state.snapshot();
+      expect(first).toBeDefined();
+      // Stamped with a value no tick produces, so the assertion below reads
+      // "the fast tick replaced this" rather than trusting a wall clock that
+      // can hand two ticks the same millisecond.
+      state.setSnapshot({ ...(first as MetricsSnapshot), at: 0 });
+
+      await runTick({ fleet, kind: 'fast', log, metrics: state });
+      // The fast tick publishes a fresh snapshot and no fresh storage, and
+      // the last measurement stays rather than disappearing for 28 minutes.
+      expect(state.snapshot()?.at).toBeGreaterThan(0);
+      expect(state.storage()).toEqual(measured);
+    } finally {
+      await fleet.close();
+    }
+  });
+
+  it('records how long each tick took', async () => {
+    const fleet = await open(measurable());
+    try {
+      await runTick({ fleet, kind: 'full', log });
+      expect(
+        Number(fleet.store.getMeta(META_LAST_FULL_TICK_MS)),
+      ).toBeGreaterThanOrEqual(0);
+      await runTick({ fleet, kind: 'fast', log });
+      expect(
+        Number(fleet.store.getMeta(META_LAST_FAST_TICK_MS)),
+      ).toBeGreaterThanOrEqual(0);
+    } finally {
+      await fleet.close();
+    }
+  });
+
+  it('measures nothing for the exporter when none is configured', async () => {
+    const transport = measurable();
+    const fleet = await open(transport);
+    try {
+      const summary = await runTick({ fleet, kind: 'full', log });
+      expect(summary.failed).toBe(0);
+      // No metrics state means no snapshot to publish, so the tick does not
+      // spend a `docker system df` on nobody.
+      expect(
+        transport.commandLines().filter((line) => line.includes('system df')),
+      ).toHaveLength(0);
+    } finally {
+      await fleet.close();
+    }
   });
 });
