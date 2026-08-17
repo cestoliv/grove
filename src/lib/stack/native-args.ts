@@ -5,6 +5,7 @@ import {
   launchdLabel,
   launchdPlistPath,
   resolveCacheRoot,
+  resolveInstallRoot,
   resolveWorkRoot,
   runnerDir,
   runnerInstallDir,
@@ -80,7 +81,8 @@ export interface NativeTarget {
   cacheDir: string;
   // The unpacked release, its .credentials, its _diag directory and the two
   // files launchd redirects into. A sibling of the work dir, so a cache wipe
-  // never takes the runner binary with it.
+  // never takes the runner binary with it, unless the group names an
+  // install_root and moves it off the work root entirely.
   installDir: string;
   // What each supervisor executes. `bin/runsvc.sh` is the entry point the
   // runner's own service templates name: it traps SIGTERM and sends the
@@ -144,7 +146,8 @@ export function buildNativeTarget(input: NativeTargetInput): NativeTarget {
   const env = { HOME: home } as NodeJS.ProcessEnv;
   const workRoot = expandHome(resolveWorkRoot(host, group), env);
   const cacheRoot = expandHome(resolveCacheRoot(host, group), env);
-  const installDir = runnerInstallDir(workRoot, group.name, index);
+  const installRoot = expandHome(resolveInstallRoot(host, group), env);
+  const installDir = runnerInstallDir(installRoot, group.name, index);
   return {
     name: runnerName(group.name, index),
     group: group.name,

@@ -1,6 +1,6 @@
 {
   "name": "@cestoliv/grove",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Declarative self-hosted CI runner fleets for GitHub and GitLab.",
   "repository": {
     "type": "git",

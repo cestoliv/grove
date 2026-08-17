@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { GroveConfig } from '../config/index.js';
 import { FakeTransport } from '../transport/index.js';
-import { createHostContext, hostWorkRoots } from './host-context.js';
+import {
+  createHostContext,
+  hostInstallRoots,
+  hostWorkRoots,
+} from './host-context.js';
 
 const CONFIG: GroveConfig = {
   tick: { fast: 120_000, full: 1_800_000 },
@@ -25,6 +29,15 @@ const CONFIG: GroveConfig = {
     },
   ],
 } as unknown as GroveConfig;
+
+function withInstallRoot(installRoot: string): GroveConfig {
+  return {
+    ...CONFIG,
+    groups: CONFIG.groups.map((group) =>
+      group.name === 'ios' ? { ...group, install_root: installRoot } : group,
+    ),
+  };
+}
 
 function transportFor(): FakeTransport {
   return new FakeTransport('mac')
@@ -156,12 +169,34 @@ describe('createHostContext', () => {
 describe('hostWorkRoots', () => {
   it('lists every distinct work root with the groups that use it', () => {
     expect(hostWorkRoots(CONFIG, 'mac', '/Users/ci')).toEqual([
-      { root: '/Volumes/ci/grove', groups: ['arm'] },
-      { root: '/Users/ci/ci/ios', groups: ['ios'] },
+      { root: '/Volumes/ci/grove', groups: ['arm'], kind: 'work' },
+      { root: '/Users/ci/ci/ios', groups: ['ios'], kind: 'work' },
     ]);
   });
 
   it('lists nothing for a host no group is placed on', () => {
     expect(hostWorkRoots(CONFIG, 'atlas')).toEqual([]);
+  });
+});
+
+describe('hostInstallRoots', () => {
+  it('lists nothing while every install dir sits under a work root', () => {
+    expect(hostInstallRoots(CONFIG, 'mac', '/Users/ci')).toEqual([]);
+  });
+
+  it('lists the install root a native group moved off its work root', () => {
+    const config = withInstallRoot('~/runners');
+    expect(hostInstallRoots(config, 'mac', '/Users/ci')).toEqual([
+      { root: '/Users/ci/runners', groups: ['ios'], kind: 'install' },
+    ]);
+  });
+
+  it('leaves out an install root a work root already covers', () => {
+    const config = withInstallRoot('/Volumes/ci/grove');
+    expect(hostInstallRoots(config, 'mac', '/Users/ci')).toEqual([]);
+  });
+
+  it('lists nothing for a host no group is placed on', () => {
+    expect(hostInstallRoots(withInstallRoot('~/runners'), 'atlas')).toEqual([]);
   });
 });

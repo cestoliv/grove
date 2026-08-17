@@ -139,6 +139,7 @@ A native group runs the GitHub Actions runner as a process on the host, supervis
     stack: native
     labels: [macos, xcode]
     work_root: ~/ci/ios
+    install_root: ~/ci/runners
     max_job_duration: 90m
     max_work_size: 120G
     raw:
@@ -153,6 +154,10 @@ grove downloads the runner release itself. It asks `api.github.com` for the late
 
 `image`, `build`, `privileged`, `volumes`, `pull_policy`, `concurrent` and `limit` describe a container, so a native group that sets one gets a warning naming the key. `labels`, `arch`, `drain_timeout` and `work_root` all reach the seat. `cache_root` names a directory grove creates and hands to nothing yet, and `max_job_duration` and `max_work_size` are carried on the seat for the daemon of milestone 5, which is what they do on a Docker seat too.
 
+`install_root` moves the runner itself off the work root. It is native only, it takes a `~` like `work_root` does, and it puts the install dir at `<install_root>/<group>-<index>-runner` instead of beside the work dir. A group that leaves it out keeps the old layout, and a Docker group that sets it gets a warning naming the key, because `install_root` describes a host install and a container has none.
+
+Like `work_root`, the key takes effect the next time grove creates the seat. Adding it to a group that is already running changes nothing on the host: the runner keeps living where it was installed, `grove logs` reads a path that is not there, and a later `teardown` deletes the new path and leaves the old install dir with its `.credentials` behind. Tear the group down before you set it: drop the group from the config, `grove apply`, add it back with `install_root`, and `grove apply` again.
+
 grove writes a native seat's install directory and work directory onto its record when it creates the seat. That is what lets `apply` and `teardown` take the seat down after its group has left the config, when the file no longer says where its files are. `grove logs` still needs the group, because it derives the log path from the config rather than from the record, and it says so rather than guessing.
 
 #### What a native host needs
@@ -161,6 +166,7 @@ grove never provisions a host. These are the things it will tell you about rathe
 
 On macOS:
 
+- A disk launchd will execute from. launchd refuses to run a program that lives on an external volume, so a group whose `work_root` sits on one needs `install_root` pointing at a path on the boot disk.
 - The Xcode command line tools, so `git`, `curl` and `tar` exist. `xcode-select -p` should print a developer directory.
 - Xcode itself for an iOS build, and `raw.env.DEVELOPER_DIR` when more than one version is installed.
 - Nothing else. launchd is always there, and grove installs the agent into the per-user domain with no `sudo`.
@@ -183,7 +189,7 @@ A host runs whichever stacks its groups ask for, and each is queried on its own.
 
 ### Architecture is a request
 
-`arch` never blocks anything. Asking for `amd64` on an `arm64` host warns and proceeds, because the person asking usually knows why.
+`arch` never blocks anything. Asking for `amd64` on an `arm64` host warns and proceeds, because the person asking usually knows why. A Docker group asking for `amd64` on an Apple Silicon Mac is the one case grove says nothing about, because Rosetta sits under Docker there and an image with no `arm64` tag runs that way every day.
 
 ## Plan and apply
 
@@ -321,7 +327,7 @@ grove never provisions a host, and that is the trade. `grove doctor` is what gro
 | Target | What it checks |
 |---|---|
 | Every host | `host.reachable` that the transport answers at all, `host.shell` that `sh` prints only what it was asked to print, `host.platform` that the host is macOS or Linux and what architecture it is, `host.clock` the skew against the control node, `host.docker-cli` and `host.docker-daemon` that a Docker group has a daemon to run on, `host.image-store` how big the image store has grown, `host.work-dirs` what the seats spend under the work root, `host.curl` that a seat publishing a metrics port can be scraped |
-| Every work root | `host.disk` free space and capacity, `host.work-root-exists` that the directory is there, `host.work-root-writable` that this user may write in it, `host.work-root-volume` that a root under `/Volumes`, `/mnt` or `/media` is a mounted disk and not the boot disk wearing its name |
+| Every work root | `host.disk` free space and capacity, `host.work-root-exists` that the directory is there, `host.work-root-writable` that this user may write in it, `host.work-root-volume` that a root under `/Volumes`, `/mnt` or `/media` is a mounted disk and not the boot disk wearing its name. The last three also run on every `install_root` a native group names |
 | Every Linux host | `host.docker-group` that the daemon answers without `sudo`, `host.systemd-user` that the user manager answers, `host.lingering` that the user session survives a logout |
 | Every macOS host | `host.launchd` that the `gui/<uid>` domain answers, `host.xcode-select` where Xcode is selected, `host.xcodebuild` that it runs and its licence is accepted, `host.simulators` that a runtime is installed |
 | Every forge | `forge.credential` that grove resolves a token, `forge.token` that the forge accepts it, `forge.scopes` that it carries the scopes the declared levels need, `forge.admin` that an `instance` level scope has an administrator behind it, `forge.scope-access` that each declared scope is readable |
@@ -479,7 +485,7 @@ grove daemon uninstall
 | `grove daemon tail` | Print the last lines of the daemon's log, and follow it with `-f` |
 | `grove daemon status` | Say whether the unit is installed, whether the loop is running, and when each tick last ran |
 
-`grove daemon install` writes `~/Library/LaunchAgents/com.cestoliv.grove.daemon.plist` on macOS or `~/.config/systemd/user/grove-daemon.service` on Linux, loads it, and starts it. The unit names the exact node binary and the exact `dist/grove.js` path, because a supervisor resolves nothing. There is no `PATH` lookup for `node` and no working directory for a relative script. **Reinstall the daemon after upgrading grove**, or the supervisor keeps running the version you replaced. The install refuses a config that does not parse, so the daemon does not flap over it, and it refuses a source checkout, because plain node cannot load `src/grove.ts`.
+`grove daemon install` writes `~/Library/LaunchAgents/com.cestoliv.grove.daemon.plist` on macOS or `~/.config/systemd/user/grove-daemon.service` on Linux, loads it, and starts it. The unit names the exact node binary and the exact `dist/grove.js` path, because a supervisor resolves nothing. There is no `PATH` lookup for `node` and no working directory for a relative script. **Reinstall the daemon after upgrading grove**, or the supervisor keeps running the version you replaced. The install refuses a config that does not parse, so the daemon does not flap over it, and it refuses a source checkout, because plain node cannot load `src/grove.ts`. On macOS it also waits for launchd to let the old label go before it loads the new plist, then asks `launchctl print` whether the label is really loaded, and it fails with the manual `launchctl bootstrap` command rather than report a daemon that is not running.
 
 The plist carries `KeepAlive` and the unit carries `Restart=on-failure` with `RestartSec=10`. The daemon is the one grove job a supervisor may resurrect: grove owns crash recovery for the runners, and the supervisor owns it for grove. A credential the daemon cannot resolve at startup makes it exit, and the restart ten seconds later is the retry.
 
@@ -590,7 +596,7 @@ grove teardown --include-unmanaged
 
 `--include-unmanaged` extends the run to containers and forge runners whose name matches `grove-<group>-<index>` but that grove has no record of. It is off by default, because a name collision is not consent. It never reaches a foreign name.
 
-On a native seat `--include-unmanaged` reads the install directory from the config, because an unmanaged seat has no record to read it from. grove removes `<work_root>/<group>-<index>-runner` and refuses any other path, so a foreign seat of the same name that lives somewhere else keeps its files. A seat whose group has also left the config has no directory in either place, and grove reports that it needs the record rather than guessing.
+On a native seat `--include-unmanaged` reads the install directory from the config, because an unmanaged seat has no record to read it from. grove removes the `<group>-<index>-runner` directory under the install root the config names and refuses any other path, so a foreign seat of the same name that lives somewhere else keeps its files. A seat whose group has also left the config has no directory in either place, and grove reports that it needs the record rather than guessing.
 
 On a GitLab forge it also reaches a runner entity described `grove-<group>` that no active record and no stored registration backs. An entity grove minted is not unmanaged, however few containers point at it, so a plain `teardown` still removes that one.
 
@@ -616,7 +622,7 @@ Every managed artifact derives its name from the group and a one-based index.
 | Work dir | `<work_root>/<group>-<index>` |
 | Cache dir | `<cache_root>/<group>-<index>` |
 | Config dir, GitLab only | `<work_root>/<group>-<index>-config` |
-| Install dir, native only | `<work_root>/<group>-<index>-runner` |
+| Install dir, native only | `<install_root>/<group>-<index>-runner`, and `<work_root>/…` when the group names no install root |
 
 Indexes run from 1 to the group's total count across every host in the placement. A group spread over two hosts still numbers its seats once, so no name appears twice.
 
@@ -636,7 +642,7 @@ The runner container gets the host Docker socket, because the Docker executor st
 
 Jobs that name no image get `alpine:latest`. Set `raw.job_image` to change that.
 
-A native group installs the runner itself. grove creates `<work_root>/<group>-<index>-runner` mode `0700`, downloads `actions-runner-<os>-<arch>-<version>.tar.gz` into it with `curl`, unpacks it with `tar`, then runs `./config.sh --url ... --token ... --name ... --work ... --unattended --replace --disableupdate [--labels a,b]` from that directory. The install dir is a sibling of the work dir, so `apply --clean` wipes the work dir and leaves the runner and its credentials in place. Creating a runner wipes both.
+A native group installs the runner itself. grove creates `<install_root>/<group>-<index>-runner` mode `0700`, which is `<work_root>/<group>-<index>-runner` unless the group names an install root, downloads `actions-runner-<os>-<arch>-<version>.tar.gz` into it with `curl`, unpacks it with `tar`, then runs `./config.sh --url ... --token ... --name ... --work ... --unattended --replace --disableupdate [--labels a,b]` from that directory. The install dir sits beside the work dir rather than inside it, so `apply --clean` wipes the work dir and leaves the runner and its credentials in place. That holds for every `install_root` except one pointed at the work dir itself, which puts the runner where `apply --clean` will take it. Creating a runner wipes both.
 
 The registration token sits in the argument vector of `config.sh` while it runs. Anyone who can read the process table on the host reads it until it expires, exactly as with the Docker stack.
 

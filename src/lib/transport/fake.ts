@@ -8,6 +8,9 @@ import type {
 interface ScriptEntry {
   prefix: string;
   result?: ExecResult;
+  // Answers for the first calls that match, in order. The last one stands
+  // for every call after them, so a script never runs out.
+  sequence?: ExecResult[];
   error?: string;
 }
 
@@ -36,6 +39,19 @@ export class FakeTransport implements Transport {
 
   fail(prefix: string, stderr: string, code = 255): this {
     return this.on(prefix, { code, stderr });
+  }
+
+  /**
+   * One answer per call, for a command grove asks twice and expects to answer
+   * differently, such as a `launchctl print` that reports a label still there
+   * and then gone. The last answer repeats once the list runs out.
+   */
+  onEach(prefix: string, results: Partial<ExecResult>[]): this {
+    if (results.length === 0) {
+      throw new Error('FakeTransport.onEach needs at least one result');
+    }
+    this.script.push({ prefix, sequence: results.map(fill) });
+    return this;
   }
 
   throwOn(prefix: string, message: string): this {
@@ -70,7 +86,13 @@ export class FakeTransport implements Transport {
     if (entry?.error !== undefined) {
       throw new Error(entry.error);
     }
-    const result = entry?.result ?? this.fallbackResult;
+    const queued =
+      entry?.sequence === undefined
+        ? undefined
+        : entry.sequence.length > 1
+          ? entry.sequence.shift()
+          : entry.sequence[0];
+    const result = queued ?? entry?.result ?? this.fallbackResult;
     if (result.stdout !== '') {
       options?.onStdout?.(result.stdout);
     }

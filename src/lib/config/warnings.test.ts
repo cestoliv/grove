@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { GroupConfig, GroveConfig } from './schema.js';
 import {
   archWarnings,
+  dockerOptionWarnings,
   nativeOptionWarnings,
   privilegedSocketWarnings,
 } from './warnings.js';
@@ -167,6 +168,55 @@ describe('archWarnings', () => {
     expect(archWarnings(buildConfig({ arch: 'amd64' }), new Map())).toEqual([]);
   });
 
+  it('stays quiet about amd64 on an Apple Silicon Mac running Docker', () => {
+    expect(
+      archWarnings(
+        buildConfig({ arch: 'amd64', stack: 'docker' }),
+        new Map([['mac', 'arm64']]),
+        new Map([['mac', 'Darwin']]),
+      ),
+    ).toEqual([]);
+  });
+
+  it('still warns about amd64 on an arm64 Linux host', () => {
+    const warnings = archWarnings(
+      buildConfig({ arch: 'amd64', stack: 'docker', placement: { atlas: 1 } }),
+      new Map([['atlas', 'arm64']]),
+      new Map([['atlas', 'Linux']]),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].message).toContain('host "atlas"');
+  });
+
+  it('still warns about amd64 on a Mac when the group is native', () => {
+    expect(
+      archWarnings(
+        buildConfig({ arch: 'amd64', stack: 'native' }),
+        new Map([['mac', 'arm64']]),
+        new Map([['mac', 'Darwin']]),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('still warns about arm64 asked of an amd64 Mac', () => {
+    expect(
+      archWarnings(
+        buildConfig({ arch: 'arm64', stack: 'docker' }),
+        new Map([['mac', 'amd64']]),
+        new Map([['mac', 'Darwin']]),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('warns when no platform is known, because the exception needs Darwin', () => {
+    expect(
+      archWarnings(
+        buildConfig({ arch: 'amd64', stack: 'docker' }),
+        new Map([['mac', 'arm64']]),
+      ),
+    ).toHaveLength(1);
+  });
+
   it('warns once per mismatched host in a map placement', () => {
     const warnings = archWarnings(
       buildConfig({ arch: 'arm64', placement: { mac: 1, atlas: 2 } }),
@@ -229,5 +279,33 @@ describe('nativeOptionWarnings', () => {
       volumes: ['/var/run/docker.sock:/var/run/docker.sock'],
     });
     expect(privilegedSocketWarnings(config)).toEqual([]);
+  });
+});
+
+describe('dockerOptionWarnings', () => {
+  it('names install_root on a Docker group', () => {
+    const warnings = dockerOptionWarnings(
+      buildConfig({ name: 'chevro-dind', install_root: '/opt/ci' }),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].code).toBe('docker-unused-option');
+    expect(warnings[0].path).toBe('groups[0].install_root');
+    expect(warnings[0].message).toBe(
+      'group "chevro-dind" runs in a container, so grove reads no install_root. Drop the key, or move the group to stack: native. grove proceeds anyway.',
+    );
+  });
+
+  it('says nothing about a native group that sets install_root', () => {
+    expect(
+      dockerOptionWarnings(
+        buildConfig({ stack: 'native', install_root: '/opt/ci' }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('says nothing about a Docker group that sets none of them', () => {
+    expect(
+      dockerOptionWarnings(buildConfig({ image: 'ubuntu:24.04' })),
+    ).toEqual([]);
   });
 });

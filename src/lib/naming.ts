@@ -125,6 +125,17 @@ export function resolveWorkRoot(host: HostConfig, group: GroupConfig): string {
   return group.work_root ?? host.work_root ?? DEFAULT_WORK_ROOT;
 }
 
+// Where the unpacked runner release goes. A native group sets install_root
+// when the work root cannot hold an executable, which on macOS is any external
+// volume, because launchd refuses to run a program from one. Everything else
+// keeps the install dir beside the work dir.
+export function resolveInstallRoot(
+  host: HostConfig,
+  group: GroupConfig,
+): string {
+  return group.install_root ?? resolveWorkRoot(host, group);
+}
+
 export function resolveCacheRoot(host: HostConfig, group: GroupConfig): string {
   return (
     group.cache_root ??

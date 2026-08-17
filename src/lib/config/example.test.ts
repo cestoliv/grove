@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { rawStackWarnings } from '../stack/index.js';
 import { loadConfig } from './load.js';
-import { nativeOptionWarnings } from './warnings.js';
+import { dockerOptionWarnings, nativeOptionWarnings } from './warnings.js';
 
 const EXAMPLE_PATH = fileURLToPath(
   new URL('../../../grove.example.yaml', import.meta.url),
@@ -95,6 +95,7 @@ describe('grove.example.yaml, the native group', () => {
     const ios = loaded.config.groups[2];
     expect(ios.name).toBe('ios');
     expect(ios.stack).toBe('native');
+    expect(ios.install_root).toBe('~/ci/runners');
     expect(ios.raw).toEqual({
       runner_version: '2.328.0',
       env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
@@ -116,5 +117,8 @@ describe('grove.example.yaml, the native group', () => {
         warning.path.startsWith('groups[2]'),
       ),
     ).toEqual([]);
+    // install_root belongs to the native seat, so no Docker group in the
+    // example carries it and nothing warns about it either.
+    expect(dockerOptionWarnings(loaded.config)).toEqual([]);
   });
 });

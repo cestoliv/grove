@@ -196,6 +196,7 @@ export const groupSchema = z.strictObject({
   max_job_duration: durationSchema.optional(),
   work_root: z.string().min(1).optional(),
   cache_root: z.string().min(1).optional(),
+  install_root: z.string().min(1).optional(),
   max_work_size: sizeSchema.optional(),
   raw: z.record(z.string(), z.unknown()).optional(),
 });

@@ -80,9 +80,16 @@ export function buildPlanReport(
   );
 
   const archByHost = new Map<string, string>();
+  const platformByHost = new Map<string, string>();
   for (const observation of options.observed.hosts) {
-    if (observation.reachable && observation.arch !== undefined) {
+    if (!observation.reachable) {
+      continue;
+    }
+    if (observation.arch !== undefined) {
       archByHost.set(observation.host, observation.arch);
+    }
+    if (observation.platform !== undefined) {
+      platformByHost.set(observation.host, observation.platform);
     }
   }
 
@@ -121,7 +128,7 @@ export function buildPlanReport(
     groups,
     warnings: [
       ...loaded.warnings,
-      ...archWarnings(loaded.config, archByHost),
+      ...archWarnings(loaded.config, archByHost, platformByHost),
       ...(options.extraWarnings ?? []),
     ],
     actions,

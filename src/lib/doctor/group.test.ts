@@ -76,9 +76,47 @@ describe('runGroupChecks', () => {
     const config = configWith([
       { ...BASE, name: 'amd', stack: 'docker', arch: 'amd64' },
     ]);
-    const report = pick(findings(config), 'group.arch', 'amd');
+    const linux = facts({ platform: 'Linux' });
+    const report = pick(findings(config, linux), 'group.arch', 'amd');
     expect(report?.status).toBe('warn');
     expect(report?.fix).toContain('emulation');
+  });
+
+  it('says nothing about amd64 on an Apple Silicon Mac running Docker', () => {
+    const config = configWith([
+      { ...BASE, name: 'amd', stack: 'docker', arch: 'amd64' },
+    ]);
+    expect(pick(findings(config), 'group.arch', 'amd')?.status).toBe('ok');
+  });
+
+  it('still warns about amd64 on an Apple Silicon Mac running native', () => {
+    const config = configWith([
+      { ...BASE, name: 'amd', stack: 'native', arch: 'amd64' },
+    ]);
+    expect(pick(findings(config), 'group.arch', 'amd')?.status).toBe('warn');
+  });
+
+  it('warns when a Docker group sets install_root, and prints the fix', () => {
+    const config = configWith([
+      {
+        ...BASE,
+        name: 'boxed',
+        stack: 'docker',
+        install_root: '/Users/ci/runners',
+      },
+    ]);
+    const report = pick(findings(config), 'group.native-option', 'boxed');
+    expect(report?.status).toBe('warn');
+    expect(report?.summary).toContain('install_root');
+    expect(report?.subject).toBe('groups[0].install_root');
+    expect(report?.fix).toContain('stack: native');
+  });
+
+  it('skips the container reading of the option check on a plain Docker group', () => {
+    const config = configWith([{ ...BASE, name: 'plain', stack: 'docker' }]);
+    expect(pick(findings(config), 'group.native-option', 'plain')?.status).toBe(
+      'skip',
+    );
   });
 
   it('skips the architecture check for a group that names none', () => {
