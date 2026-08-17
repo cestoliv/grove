@@ -25,6 +25,15 @@ export const tickSchema = z.strictObject({
   full: durationSchema.optional(),
 });
 
+// The spec fixes the default at ninety days. Pruning runs on the full tick,
+// so a fleet that never runs the daemon never prunes, and that is correct:
+// nothing is writing history either.
+export const DEFAULT_HISTORY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+export const historySchema = z.strictObject({
+  retention: durationSchema.optional(),
+});
+
 const localHostSchema = z.strictObject({
   type: z.literal('local'),
   work_root: z.string().min(1).optional(),
@@ -182,6 +191,7 @@ export const groupSchema = z.strictObject({
 
 export const configSchema = z.strictObject({
   tick: tickSchema.optional(),
+  history: historySchema.optional(),
   hosts: z.record(z.string().min(1), hostSchema),
   forges: z.record(z.string().min(1), forgeSchema),
   groups: z.array(groupSchema).min(1, 'declare at least one group'),
@@ -192,5 +202,12 @@ export type Level = Scope['level'];
 export type Placement = Record<string, number>;
 export type GroupConfig = z.infer<typeof groupSchema>;
 export type StackKind = GroupConfig['stack'];
+export type HistoryConfig = { retentionMs: number };
 export type ParsedConfig = z.infer<typeof configSchema>;
-export type GroveConfig = Omit<ParsedConfig, 'tick'> & { tick: TickConfig };
+export type GroveConfig = Omit<ParsedConfig, 'tick' | 'history'> & {
+  tick: TickConfig;
+  // The loader always fills this. It is optional on the type because every
+  // fixture in the suite builds a GroveConfig by hand, and the one reader
+  // falls back to the same default anyway.
+  history?: HistoryConfig;
+};

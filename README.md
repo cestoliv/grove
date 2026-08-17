@@ -6,7 +6,7 @@ grove is agentless. One control node holds the config and reaches every host ove
 
 ## Status
 
-Milestone 4 of six. grove manages GitHub and GitLab runners in Docker containers, and GitHub runners as processes on the host under launchd on macOS and systemd on Linux. `config`, `plan`, `apply`, `status`, `logs` and `teardown` work on every one of them. The daemon and stuck detection arrive in milestone 5, and `doctor` and Prometheus metrics in milestone 6.
+Milestone 5 of six. grove manages GitHub and GitLab runners in Docker containers, and GitHub runners as processes on the host under launchd on macOS and systemd on Linux. `config`, `plan`, `apply`, `status`, `logs` and `teardown` work on every one of them. `grove daemon` now converges the fleet on its own, detects stuck runners, prunes work directories against `max_work_size` and prunes its own history against `history.retention`. `doctor` and Prometheus metrics arrive in milestone 6.
 
 Switching a group from `docker` to `native`, or back, takes two applies. The first drains the seat on the stack it runs on today, deregisters it and retires its record. The second creates it on the new stack. grove refuses to run one runner name on two supervisors at once, so it waits for the record to go before it makes the new seat.
 
@@ -284,7 +284,130 @@ Shared runners
   gl-chevro  chevro-dind  48      docker,dind  2/3
 ```
 
+When a daemon has run on this control node, `grove status` closes with a `Daemon` block saying whether the loop is running, under which pid, and when each tick last ran. A `grove apply` that holds the lock is not the daemon and is never reported as one. A fleet with suspect runners gains a `Suspect runners` table naming each one, the host it sits on, when it became a suspect and why. [Stuck detection](#stuck-detection) says what makes one.
+
+```
+Daemon
+  process    running, pid 4242 (daemon)
+  last fast  2026-08-16T09:12:04.008Z
+  last full  2026-08-16T08:44:11.412Z
+
+Suspect runners
+  RUNNER                HOST  SINCE                     REASON
+  grove-overload-arm-1  mac   2026-08-16T08:44:11.412Z  the forge has said busy for 140m against a max_job_duration of 90m, but the work dir /Volumes/ci/grove/overload-arm-1 reads as active
+```
+
 `grove logs` takes a group name or a runner name, and reads whichever stack that runner uses. A Docker seat goes to `docker logs`. A native seat on macOS goes to `tail` on the two files launchd redirects into, `<install_dir>/stdout.log` and `<install_dir>/stderr.log`. A native seat on Linux goes to `journalctl --user -u grove-<group>-<index>.service`, and grove points at the runner's own `_diag` directory when `journalctl` is not installed. A group with several runners prints each in turn with a header. `--follow` needs exactly one runner. `--tail` defaults to 200 lines.
+
+## The daemon
+
+```bash
+grove daemon install
+grove daemon status
+grove daemon tail -n 200 --follow
+grove daemon uninstall
+```
+
+| Command | What it does |
+|---|---|
+| `grove daemon install` | Write the launchd agent or the systemd user unit, load it, and start the loop |
+| `grove daemon uninstall` | Unload and remove it. The runners keep running |
+| `grove daemon run` | Run the loop in the foreground. This is what the installed unit executes |
+| `grove daemon tail` | Print the last lines of the daemon's log, and follow it with `-f` |
+| `grove daemon status` | Say whether the unit is installed, whether the loop is running, and when each tick last ran |
+
+`grove daemon install` writes `~/Library/LaunchAgents/com.cestoliv.grove.daemon.plist` on macOS or `~/.config/systemd/user/grove-daemon.service` on Linux, loads it, and starts it. The unit names the exact node binary and the exact `dist/grove.js` path, because a supervisor resolves nothing. There is no `PATH` lookup for `node` and no working directory for a relative script. **Reinstall the daemon after upgrading grove**, or the supervisor keeps running the version you replaced. The install refuses a config that does not parse, so the daemon does not flap over it, and it refuses a source checkout, because plain node cannot load `src/grove.ts`.
+
+The plist carries `KeepAlive` and the unit carries `Restart=on-failure` with `RestartSec=10`. The daemon is the one grove job a supervisor may resurrect: grove owns crash recovery for the runners, and the supervisor owns it for grove. A credential the daemon cannot resolve at startup makes it exit, and the restart ten seconds later is the retry.
+
+`grove daemon uninstall` unloads and removes it. The runners keep running, and nothing restarts one that wedges. It also clears the suspects, because no tick is left to revisit them and a stale suspect in `grove status` is worse than none.
+
+`grove daemon status` prints the config it reads, the state directory, the log path, the unit path and whether that unit is installed, whether the loop is running and under which pid, who holds the reconciler lock, when the daemon last started, and when each tick last ran. Liveness comes from the pid the running loop publishes in `meta`, not from the lock, because the lock is taken per tick and is free between them. It exits 1 when the loop is not running. A control node that will not answer the probe reads `unknown` rather than `not installed`, because sending an operator to reinstall something already there is worse than admitting grove does not know.
+
+`grove daemon tail -n 200 -f` follows `<stateDir>/grove.log`. That is the daemon's own log, on the control node. `grove logs <group>` is a runner's log, read from the host that runs it. They are different files on different machines, which is why `daemon tail` counts lines with `-n`, the way `tail` does, and `grove logs` counts them with `--tail`.
+
+`grove daemon run` is what the unit executes. Running it by hand in a terminal is a supported way to watch a tick happen, and Ctrl-C stops it cleanly.
+
+On Linux a user session ends with the login shell unless the user lingers, and the daemon ends with it. Run `loginctl enable-linger $USER` once.
+
+### The two ticks
+
+| Tick | Default | What it does |
+|---|---|---|
+| fast | `tick.fast`, 2m | One `docker ps` and one supervisor query per host. Starts a seat whose container or unit has stopped. Calls no forge, so it creates nothing and removes nothing. |
+| full | `tick.full`, 30m | Everything the fast tick does, plus the forge calls: creates missing seats, scales groups down, deregisters what left the config, detects stuck runners, prunes work dirs and prunes history. |
+
+```yaml
+tick: { fast: 2m, full: 30m }
+```
+
+The daemon executes destructive changes without asking. It has no prompt to offer, the config is the declared intent, and a group that shrank in the file loses seats on the next full tick. `--include-unmanaged` belongs to `teardown`, and the daemon never does it.
+
+What that costs in recovery time:
+
+| Failure | What brings it back | Latency |
+|---|---|---|
+| The container exited, or the launchd job stopped | `start-container` on the fast tick | up to `tick.fast`, 2 minutes by default |
+| The container was removed, or the unit file is gone | `create-runner` on the full tick, because registration needs a forge call | up to `tick.full`, 30 minutes by default |
+| The runner is wedged mid-job | `restart-runner` on the full tick, because the busy signal is a forge call | up to `tick.full` |
+| The runner runs but no longer appears at the forge | stop, remove and create on the full tick, after the condition has held for one full tick | up to two `tick.full` |
+
+The last row never applies to a GitLab group, where one runner entity is shared by every manager in the group. A seat GitLab does not list there means grove has not yet learned its system id, not that GitLab forgot it.
+
+The first tick after an install is a full one and runs immediately, so `grove daemon install` converges the fleet now rather than in half an hour. A tick that overruns delays the next one instead of stacking behind it, and a full tick replaces the fast tick it coincides with.
+
+The config is reloaded before every tick. A config that stops parsing keeps the last good one and logs why, because a daemon that stops converging over a typo is worse than one converging on yesterday's file. When the hosts, the forges or `tick.fast` change, grove reopens its connections, and the new context opens before the old one closes, so a failed reopen leaves the daemon with working connections rather than none. Editing a group costs nothing, and a `command:` credential is not re-run every thirty minutes.
+
+`grove status` gains a `Daemon` block saying whether the loop is running and when each tick last ran, so the question "is anything watching this fleet" has an answer from the command you already run.
+
+### Stuck detection
+
+A wedged runner is one the forge still calls busy while nothing on the host moves. grove reads two signals, and only ever for a seat the forge says is busy, because an idle runner with a quiet work directory is a healthy runner.
+
+| Signal | Where it comes from |
+|---|---|
+| forge | The runner has been busy longer than the group's `max_job_duration` |
+| host | Nothing under the seat's work directory has changed since the previous full tick |
+
+grove restarts a seat only when both agree. One alone makes the seat a **suspect**, which `grove status` lists with its reason and the time it started, and which nothing acts on. A group that sets no `max_job_duration` can never produce the forge signal, so grove reports it and never restarts it.
+
+A restart skips the drain, because the job grove would wait for is the reason it is restarting. It wipes the work directory and keeps the install directory, so a native seat keeps the runner release and the credentials it registered with. It records a `restarted` event carrying the reason, and closes the job it killed with the outcome `restarted`.
+
+Two limits stand between a wrong guess and a loop. grove waits 10 minutes after a restart before it restarts the same seat again, and it makes at most 3 restarts per seat per rolling hour. A restart blocked by either becomes a suspect naming which one blocked it. Both read the `events` table, so the operator reads the same history grove decided on.
+
+Detection runs on the full tick, because the busy signal is a forge call. The latency is therefore `tick.full`, and a `max_job_duration` of 90 minutes with a detection latency of 30 minutes is a sound trade.
+
+The host signal reads the work directory rather than a log file, because a Docker runner's log lives inside the container and a native runner's lives in `_diag`. grove keeps a stamp file beside the work directory, asks the host for the first file newer than it, and touches the stamp. Anything other than a clear "nothing changed" means grove does not know, and grove does nothing.
+
+### Storage and history
+
+A group that sets `max_work_size` gets its work directories measured on every full tick, in one exec per host. A seat over its ceiling loses whole top-level entries, oldest first, until it fits. grove removes only direct children of the work directory, never one whose name starts with a dot, and never one holding a slash, because grove deletes build output it can name and not hidden state something else left. A seat the forge calls busy is never measured and never pruned, and neither is a seat whose forge did not answer at all: deleting the tree a job is building in is worse than a full disk. A host grove cannot measure is left for the next tick.
+
+`history.retention` says how long grove keeps lifecycle events, liveness samples and job rows in `grove.db`. It defaults to 90 days, and the full tick prunes what is older.
+
+```yaml
+history: { retention: 90d }
+```
+
+`meta` and `runner_watch` in `grove.db` are the exception to "every decision comes from the fleet, never from SQLite", alongside the GitLab authentication token. Every column in them is an observation grove made, kept only so the next observation can be compared with it, and losing a row costs one tick of latency and nothing else.
+
+`<stateDir>/grove.log` records events, not a heartbeat. A fast tick that found nothing writes nothing, because 720 lines a day saying nothing happened is how a log stops being read. Reachability changes, executed actions, failures, fresh suspects, prunes and retention are logged, and a suspect is logged once when it appears rather than once per tick. The heartbeat lives in `grove daemon status` and in the `Daemon` block of `grove status`.
+
+The log names hosts, groups and runner names, and it never prints a token. It does quote the stderr of a `command:` credential that failed, because that message is the only thing that explains why the daemon could not start, so keep the state directory as private as its `0700` mode makes it.
+
+### One reconciler at a time
+
+`apply`, `teardown` and the daemon take one lock, `<stateDir>/grove.pid`. Two reconcilers on one fleet would mint two registrations for a seat, or drain a container the other just started.
+
+A command that finds the lock held names who holds it, by pid and by command, and exits 1.
+
+```
+another grove process holds /…/grove.pid: pid 4242 (daemon) since 2026-08-16T09:12:04.008Z. Wait for it to finish, or stop the daemon. grove plan, grove status and grove logs still work.
+```
+
+`plan`, `status`, `logs`, `config` and every `daemon` subcommand except `run` take nothing, so a fleet the daemon is converging is still readable. There is no `--force`, because a lock an operator can override is a lock that gets overridden at exactly the wrong moment. A stale lock, one whose pid is not alive, is taken over automatically, which is what a reboot leaves behind.
+
+The daemon takes the lock per tick, not for its whole life. It holds the lock while a tick runs and releases it in between, so `grove apply` and `grove teardown` run in the gap between two ticks rather than needing `grove daemon uninstall` first. A tick that finds the lock held is skipped, the daemon says so once in `grove.log`, and the next tick picks up whatever the apply left behind.
 
 ## Teardown
 
@@ -429,7 +552,20 @@ grove keeps its history in one directory. `GROVE_STATE_DIR` overrides it.
 | Linux | `$XDG_STATE_HOME/grove`, falling back to `~/.local/state/grove` |
 | macOS | `~/Library/Application Support/grove` |
 
-`grove.db` is a SQLite database opened with `node:sqlite`. It records which runners grove created, their lifecycle events, liveness samples, and one row per GitLab group holding that group's runner entity id and its `glrt-` authentication token. Everything but that token is history and ownership proof, and every decision comes from `docker ps` and the forge API, so a lost database changes what grove can tell you about last week, never what it does to your fleet. The token is the exception, because GitLab shows it once and grove needs it to start another manager later.
+| File | What it is |
+|---|---|
+| `grove.db` | The history and ownership database |
+| `grove.log` | The daemon's append-only log, read with `grove daemon tail` |
+| `grove.log.1` | The one previous log, kept across a rollover |
+| `grove.pid` | The lock `apply`, `teardown` and the daemon share |
+| `daemon.out.log` | What the daemon printed before its own logger opened, macOS only |
+| `daemon.err.log` | What a crash printed on the way out, macOS only |
+
+`grove.db` is a SQLite database opened with `node:sqlite`. It records which runners grove created, their lifecycle events, liveness samples, one row per job a runner ran, and one row per GitLab group holding that group's runner entity id and its `glrt-` authentication token. Everything but that token is history and ownership proof, and every decision comes from `docker ps` and the forge API, so a lost database changes what grove can tell you about last week, never what it does to your fleet. The token is the exception, because GitLab shows it once and grove needs it to start another manager later. `meta` and `runner_watch` are the other exception, and [Storage and history](#storage-and-history) says why.
+
+A job row is derived from a busy transition between two full ticks, because neither forge tells grove how a job ended without a per-job call grove does not make. Its duration is therefore accurate to about one `tick.full`, and its outcome is `unknown` unless grove itself ended it, in which case it is `restarted`. A duration accurate to plus or minus thirty minutes is useful, and one pretending to be exact is not.
+
+`grove.log` rolls over at 50 MB. grove renames it to `grove.log.1` and starts a new one, so exactly one previous file is kept and the directory never grows without bound. On Linux the daemon writes no separate stdout file, because the journal already holds that output.
 
 The state directory is created mode `0700` and `grove.db` mode `0600`, because that file holds a runner authentication token. Treat it like an SSH private key. If you lose it, tear the GitLab group down and let grove create it again.
 

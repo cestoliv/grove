@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { StateLock } from '../lib/daemon/lock.js';
 import { FakeForgeClient } from '../lib/forge/index.js';
 import { StateStore } from '../lib/state/index.js';
 import { FakeTransport } from '../lib/transport/index.js';
@@ -61,7 +62,7 @@ function mac(): FakeTransport {
 function options(extra: Record<string, unknown> = {}) {
   return {
     config: join(dir, 'grove.yaml'),
-    env: {},
+    env: { GROVE_STATE_DIR: join(dir, 'state') },
     store,
     connect: () => mac(),
     resolveToken: async () => 'token',
@@ -119,5 +120,84 @@ describe('runStatus', () => {
       }),
     );
     expect(code).toBe(EXIT_UNREACHABLE);
+  });
+});
+
+describe('runStatus and the daemon', () => {
+  it('reads the daemon pid and the last tick times', async () => {
+    store.setMeta('daemon_pid', '4242');
+    store.setMeta('last_full_tick', '1700000000000');
+
+    const out: string[] = [];
+    await runStatus(
+      options({
+        json: true,
+        isPidAlive: () => true,
+        stdout: (text: string) => out.push(text),
+      }),
+    );
+    const report = JSON.parse(out.join('\n'));
+
+    expect(report.daemon.pid).toBe(4242);
+    expect(report.daemon.command).toBe('daemon');
+    expect(report.daemon.alive).toBe(true);
+    expect(report.daemon.lastFullTick).toBe(1_700_000_000_000);
+  });
+
+  it('does not read an apply that holds the lock as the daemon', async () => {
+    // The daemon takes the reconciler lock per tick, so the holder is often
+    // somebody else and is absent for most of the time the daemon is running.
+    // Liveness comes from the daemon's own pid instead.
+    const held = StateLock.acquire({
+      path: join(dir, 'state', 'grove.pid'),
+      command: 'apply',
+      pid: 99,
+      isPidAlive: () => false,
+    });
+
+    const out: string[] = [];
+    await runStatus(
+      options({
+        json: true,
+        isPidAlive: () => true,
+        stdout: (text: string) => out.push(text),
+      }),
+    );
+    const report = JSON.parse(out.join('\n'));
+
+    expect(report.daemon.alive).toBe(false);
+    expect(report.daemon.pid).toBeUndefined();
+    held.release();
+  });
+
+  it('lists a seat the supervisor marked as a suspect', async () => {
+    const record = store.createRunner({
+      group: 'overload-arm',
+      index: 1,
+      host: 'mac',
+      forge: 'gh-overload',
+      name: 'grove-overload-arm-1',
+    });
+    store.setWatch(record.id, {
+      busySince: 1000,
+      unregisteredSince: null,
+      suspectSince: 2000,
+      suspectReason: 'the forge says busy and the work dir is quiet',
+    });
+
+    const out: string[] = [];
+    await runStatus(
+      options({ json: true, stdout: (text: string) => out.push(text) }),
+    );
+    const report = JSON.parse(out.join('\n'));
+
+    expect(report.suspects).toEqual([
+      {
+        runner: 'grove-overload-arm-1',
+        host: 'mac',
+        since: 2000,
+        reason: 'the forge says busy and the work dir is quiet',
+      },
+    ]);
   });
 });

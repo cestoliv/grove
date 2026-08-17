@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { GroupConfig, HostConfig } from './config/index.js';
 import {
+  activityStampFor,
+  assertRunnerWorkDir,
   containerName,
+  DAEMON_LABEL,
+  DAEMON_UNIT,
   DEFAULT_WORK_ROOT,
+  daemonPlistPath,
+  daemonUnitPath,
   isManagedName,
   launchdLabel,
   launchdPlistPath,
@@ -210,5 +216,69 @@ describe('native seat names', () => {
     expect(runnerNameFromSystemdUnit('grove-daemon.service')).toBeNull();
     expect(runnerNameFromSystemdUnit('docker.service')).toBeNull();
     expect(runnerNameFromSystemdUnit('grove-ios-1')).toBeNull();
+  });
+});
+
+describe('the daemon name', () => {
+  it('uses the fixed label and unit the spec names', () => {
+    expect(DAEMON_LABEL).toBe('com.cestoliv.grove.daemon');
+    expect(DAEMON_UNIT).toBe('grove-daemon.service');
+  });
+
+  it('places the plist and the unit under the operator home', () => {
+    expect(daemonPlistPath('/Users/olivier')).toBe(
+      '/Users/olivier/Library/LaunchAgents/com.cestoliv.grove.daemon.plist',
+    );
+    expect(daemonUnitPath('/home/ci')).toBe(
+      '/home/ci/.config/systemd/user/grove-daemon.service',
+    );
+  });
+
+  // The supervisor listing on a control node that also runs runners contains
+  // the daemon itself. It must never read as a seat.
+  it('is not a runner name to either supervisor reader', () => {
+    expect(runnerNameFromLaunchdLabel(DAEMON_LABEL)).toBeNull();
+    expect(runnerNameFromSystemdUnit(DAEMON_UNIT)).toBeNull();
+  });
+
+  it('puts the activity stamp beside the work dir, never inside it', () => {
+    expect(activityStampFor('/Volumes/ci/grove/overload-arm-1')).toBe(
+      '/Volumes/ci/grove/overload-arm-1.stamp',
+    );
+  });
+
+  describe('assertRunnerWorkDir', () => {
+    it('accepts the work dir grove built for that seat', () => {
+      expect(() =>
+        assertRunnerWorkDir(
+          '/Volumes/ci/grove/overload-arm-1',
+          'grove-overload-arm-1',
+        ),
+      ).not.toThrow();
+    });
+
+    it('refuses a path that is not this seat', () => {
+      for (const bad of [
+        '/Volumes/ci/grove/overload-arm-2',
+        '/Volumes/ci/grove',
+        '/Volumes/ci/grove/overload-arm-1/_work',
+        '/',
+        // No parent, so a top-level directory rather than a seat.
+        '/overload-arm-1',
+        // Absolute, ends right, and still climbs out on the way.
+        '/Volumes/../../etc/overload-arm-1',
+        'Volumes/ci/grove/overload-arm-1',
+      ]) {
+        expect(() => assertRunnerWorkDir(bad, 'grove-overload-arm-1')).toThrow(
+          /refusing to wipe/,
+        );
+      }
+    });
+
+    it('refuses a name that is not a grove seat', () => {
+      expect(() =>
+        assertRunnerWorkDir('/Volumes/ci/grove/overload-arm-1', 'jenkins-1'),
+      ).toThrow(/not the name of a grove seat/);
+    });
   });
 });

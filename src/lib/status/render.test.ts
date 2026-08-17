@@ -26,6 +26,7 @@ function report(overrides: Partial<StatusReport> = {}): StatusReport {
     configPath: '/work/grove.yaml',
     rows: [row()],
     sharedRunners: [],
+    suspects: [],
     unreachableHosts: [],
     unreachableForges: [],
     ok: true,
@@ -102,6 +103,7 @@ describe('renderStatusReport', () => {
 describe('renderStatusReport, managers', () => {
   const base = {
     configPath: '/tmp/grove.yaml',
+    suspects: [],
     unreachableHosts: [],
     unreachableForges: [],
     ok: true,
@@ -202,6 +204,7 @@ describe('renderStatusReport, the stack column', () => {
           },
         ],
         sharedRunners: [],
+        suspects: [],
         unreachableHosts: [],
         unreachableForges: [],
         ok: true,
@@ -213,5 +216,78 @@ describe('renderStatusReport, the stack column', () => {
     expect(text).toContain(
       'ios    mac   grove-ios-1  native  running  pid 4242',
     );
+  });
+});
+
+describe('the daemon and the suspect sections', () => {
+  it('says whether the control loop is running and when it last ran', () => {
+    const text = renderStatusReport(
+      report({
+        daemon: {
+          lockPath: '/state/grove.pid',
+          pid: 4242,
+          command: 'daemon',
+          alive: true,
+          lastFastTick: 1_700_000_000_000,
+          lastFullTick: 1_699_999_000_000,
+        },
+      }),
+      { color: false },
+    );
+    expect(text).toContain('Daemon');
+    expect(text).toContain('pid 4242');
+    expect(text).toContain('2023-11-14');
+  });
+
+  it('says the loop is not running when nothing holds the lock', () => {
+    const text = renderStatusReport(
+      report({ daemon: { lockPath: '/state/grove.pid', alive: false } }),
+      { color: false },
+    );
+    expect(text).toContain('not running');
+  });
+
+  it('does not report a concurrent apply as the daemon', () => {
+    // apply, teardown and the daemon share one lock file, so the holder is not
+    // the daemon just because there is one. A heading that said otherwise
+    // would answer the wrong question.
+    const text = renderStatusReport(
+      report({
+        daemon: {
+          lockPath: '/state/grove.pid',
+          pid: 4242,
+          command: 'apply',
+          alive: true,
+        },
+      }),
+      { color: false },
+    );
+    expect(text).toContain('not running');
+    expect(text).not.toContain('pid 4242');
+  });
+
+  it('prints nothing about the daemon when the caller read nothing', () => {
+    expect(renderStatusReport(report(), { color: false })).not.toContain(
+      'Daemon',
+    );
+  });
+
+  it('lists a suspect with its reason', () => {
+    const text = renderStatusReport(
+      report({
+        suspects: [
+          {
+            runner: 'grove-ios-1',
+            host: 'mac',
+            since: 1_700_000_000_000,
+            reason: 'busy for 118m, but the work dir is still changing',
+          },
+        ],
+      }),
+      { color: false },
+    );
+    expect(text).toContain('Suspect runners');
+    expect(text).toContain('grove-ios-1');
+    expect(text).toContain('busy for 118m');
   });
 });

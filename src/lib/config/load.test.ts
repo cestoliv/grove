@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ConfigError } from './errors.js';
 import { loadConfig } from './load.js';
+import { DEFAULT_HISTORY_RETENTION_MS } from './schema.js';
 
 // Built at runtime so secret scanners do not match the fixture.
 const FAKE_GHP = ['ghp', '0123456789abcdefghij'].join('_');
@@ -210,5 +211,27 @@ describe('loadConfig', () => {
     const path = await write('hosts: {}\nforges: {}\ngroups: []\n');
     const error = await loadConfig({ path, env: {} }).catch((e) => e);
     expect(error.message).toContain(`Invalid config at ${path}`);
+  });
+});
+
+describe('history retention', () => {
+  it('reads the retention the config names', async () => {
+    const path = await write(`${VALID}\nhistory: { retention: 14d }\n`);
+    const loaded = await loadConfig({
+      path,
+      env: { GH_TOKEN: 'from-env' },
+    });
+    expect(loaded.config.history?.retentionMs).toBe(14 * 24 * 60 * 60 * 1000);
+  });
+
+  it('falls back to ninety days when the config names none', async () => {
+    const path = await write(VALID);
+    const loaded = await loadConfig({
+      path,
+      env: { GH_TOKEN: 'from-env' },
+    });
+    expect(loaded.config.history?.retentionMs).toBe(
+      DEFAULT_HISTORY_RETENTION_MS,
+    );
   });
 });

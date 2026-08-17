@@ -13,6 +13,7 @@ import {
   NativeStack,
   type NativeTarget,
   nativeTargetFromDirs,
+  type RunnerDirs,
   type RunnerVersionResolver,
   rawNativeOptions,
 } from '../stack/index.js';
@@ -207,6 +208,33 @@ function nativeTargetFor(
     home,
     installDir: record.installDir,
     workDir: record.workDir,
+  });
+}
+
+// The directories of a Docker seat whose group is still declared. A restart
+// and a `--clean` start both wipe the work dir, and both need the same
+// derivation the create used.
+function dockerDirsFor(
+  runtime: Runtime,
+  action: { host: string; name: string },
+): RunnerDirs {
+  const parsed = parseManagedName(action.name);
+  if (parsed === null) {
+    throw new Error(
+      `"${action.name}" is not a name grove derives from a group`,
+    );
+  }
+  const host = runtime.config.hosts[action.host];
+  if (host === undefined) {
+    throw new Error(
+      `host "${action.host}" is no longer in the config, so grove cannot derive the directories of "${action.name}"`,
+    );
+  }
+  return buildRunnerDirs({
+    group: groupFor(runtime.config, parsed.group),
+    host,
+    index: parsed.index,
+    home: runtime.hosts.get(action.host)?.home,
   });
 }
 
@@ -488,15 +516,8 @@ async function startContainer(
   runtime: Runtime,
 ): Promise<void> {
   const stack = stackFor(runtime, action.host);
-  const parsed = parseManagedName(action.name);
-  if (runtime.clean === true && parsed !== null) {
-    const dirs = buildRunnerDirs({
-      group: groupFor(runtime.config, parsed.group),
-      host: runtime.config.hosts[action.host],
-      index: parsed.index,
-      home: runtime.hosts.get(action.host)?.home,
-    });
-    await stack.prepareDirs(dirs, { wipe: true });
+  if (runtime.clean === true && parseManagedName(action.name) !== null) {
+    await stack.prepareDirs(dockerDirsFor(runtime, action), { wipe: true });
   }
   await stack.start(action.name);
   if (action.recordId !== undefined) {
@@ -541,6 +562,35 @@ async function runAction(action: Action, runtime: Runtime): Promise<void> {
       if (action.recordId !== undefined) {
         runtime.store.recordEvent(action.recordId, 'removed');
       }
+      return;
+    }
+    case 'restart-runner': {
+      // A zero drain, always. The job grove would wait for is the reason it
+      // is restarting, so waiting for it is waiting forever.
+      if (stack === 'native') {
+        const native = nativeFor(runtime, action.host);
+        const target = nativeTargetFor(runtime, action);
+        await native.stop(target, 0);
+        // The work dir goes and the install dir stays, so the seat keeps the
+        // runner release and the credentials it registered with.
+        await native.prepareDirs(target, {
+          wipeWork: true,
+          wipeInstall: false,
+        });
+        await native.start(target);
+      } else {
+        const docker = stackFor(runtime, action.host);
+        // Derived before the stop, the way the native branch derives its
+        // target, so a seat grove cannot place fails without being taken
+        // down and left that way.
+        const dirs = dockerDirsFor(runtime, action);
+        await docker.stop(action.name, 0);
+        await docker.prepareDirs(dirs, { wipe: true });
+        await docker.start(action.name);
+      }
+      // The reason travels into the event row, so the restart ceiling and the
+      // operator read the same history.
+      runtime.store.recordEvent(action.recordId, 'restarted', action.reason);
       return;
     }
     case 'deregister-runner': {

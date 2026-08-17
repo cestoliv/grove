@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { GroveConfig, LoadedConfig } from '../config/index.js';
 import type { ObservedState } from '../reconcile/index.js';
 import type { RunnerRecord } from '../state/index.js';
-import { buildStatusReport, livenessFor } from './report.js';
+import { buildStatusReport, hostLivenessFor, livenessFor } from './report.js';
 
 const SCOPE = { level: 'organization', target: 'Overload-coach' } as const;
 
@@ -411,5 +411,59 @@ describe('buildStatusReport, native seats', () => {
       process: 'missing',
       detail: '',
     });
+  });
+});
+
+describe('hostLivenessFor', () => {
+  // The fast tick calls no forge, so every row it builds reads `unknown` at
+  // the forge and livenessFor would call a running seat offline.
+  it('reads the host and nothing else', () => {
+    const row = {
+      group: 'ios',
+      host: 'mac',
+      runner: 'grove-ios-1',
+      stack: 'docker' as const,
+      process: 'running',
+      detail: 'Up 2 hours',
+      forge: 'gh-overload',
+      forgeStatus: 'unknown' as const,
+      ownership: 'managed' as const,
+    };
+    expect(hostLivenessFor(row)).toBe('online');
+    expect(hostLivenessFor({ ...row, process: 'exited' })).toBe('offline');
+    expect(hostLivenessFor({ ...row, process: 'missing' })).toBe('missing');
+    // Even when the forge did answer, this reads only the host.
+    expect(hostLivenessFor({ ...row, forgeStatus: 'busy' })).toBe('online');
+  });
+});
+
+describe('the daemon and the suspects', () => {
+  it('carries what the caller read out of the store and the lockfile', () => {
+    const built = buildStatusReport(loaded(), observed(), [], {
+      suspects: [
+        {
+          runner: 'grove-ios-1',
+          host: 'mac',
+          since: 1_700_000_000_000,
+          reason: 'the forge says busy and the work dir reads as unknown',
+        },
+      ],
+      daemon: {
+        lockPath: '/state/grove.pid',
+        pid: 4242,
+        command: 'daemon',
+        alive: true,
+        lastFastTick: 1_700_000_000_000,
+      },
+    });
+
+    expect(built.suspects).toHaveLength(1);
+    expect(built.daemon?.pid).toBe(4242);
+  });
+
+  it('defaults to no suspects and no daemon', () => {
+    const built = buildStatusReport(loaded(), observed(), []);
+    expect(built.suspects).toEqual([]);
+    expect(built.daemon).toBeUndefined();
   });
 });

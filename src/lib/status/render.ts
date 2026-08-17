@@ -8,6 +8,10 @@ export interface StatusRenderOptions {
   color?: boolean;
 }
 
+function stamp(ts: number | undefined): string {
+  return ts === undefined ? 'never' : new Date(ts).toISOString();
+}
+
 export function renderStatusReport(
   report: StatusReport,
   options: StatusRenderOptions = {},
@@ -74,6 +78,40 @@ export function renderStatusReport(
         entity.entityId,
         entity.tags.join(','),
         `${entity.managers}/${entity.expected}`,
+      ]),
+    )) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  if (report.daemon !== undefined) {
+    const daemon = report.daemon;
+    lines.push('', 'Daemon');
+    // apply, teardown and the daemon share one lock file, so a holder is not
+    // the daemon just because there is one. An in-flight apply under a heading
+    // that says Daemon would answer a question nobody asked.
+    const loop =
+      daemon.alive && daemon.pid !== undefined && daemon.command === 'daemon';
+    lines.push(
+      `  process    ${
+        loop
+          ? c.green(`running, pid ${daemon.pid} (${daemon.command})`)
+          : c.red('not running')
+      }`,
+    );
+    lines.push(`  last fast  ${stamp(daemon.lastFastTick)}`);
+    lines.push(`  last full  ${stamp(daemon.lastFullTick)}`);
+  }
+
+  if (report.suspects.length > 0) {
+    lines.push('', 'Suspect runners');
+    for (const line of renderTable(
+      ['RUNNER', 'HOST', 'SINCE', 'REASON'],
+      report.suspects.map((suspect) => [
+        suspect.runner,
+        suspect.host,
+        stamp(suspect.since),
+        suspect.reason,
       ]),
     )) {
       lines.push(`  ${line}`);

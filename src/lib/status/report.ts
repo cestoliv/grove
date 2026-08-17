@@ -43,10 +43,35 @@ export interface SharedRunnerRow {
   expected: number;
 }
 
+export interface SuspectRow {
+  runner: string;
+  host: string;
+  since: number;
+  reason: string;
+}
+
+// What the control loop is doing, read from the lockfile and the meta table
+// rather than derived from anything grove observed on this run.
+export interface DaemonStatus {
+  lockPath: string;
+  pid?: number;
+  command?: string;
+  alive: boolean;
+  lastFastTick?: number;
+  lastFullTick?: number;
+}
+
+export interface StatusReportOptions {
+  suspects?: SuspectRow[];
+  daemon?: DaemonStatus;
+}
+
 export interface StatusReport {
   configPath: string;
   rows: StatusRow[];
   sharedRunners: SharedRunnerRow[];
+  suspects: SuspectRow[];
+  daemon?: DaemonStatus;
   unreachableHosts: string[];
   unreachableForges: string[];
   ok: boolean;
@@ -56,6 +81,7 @@ export function buildStatusReport(
   loaded: LoadedConfig,
   observed: ObservedState,
   records: RunnerRecord[],
+  options: StatusReportOptions = {},
 ): StatusReport {
   // Status only reports, it never decides what to destroy, so it keeps
   // whatever grove last knew about an unreachable host or forge instead of
@@ -151,6 +177,8 @@ export function buildStatusReport(
     configPath: loaded.path,
     rows,
     sharedRunners,
+    suspects: options.suspects ?? [],
+    ...(options.daemon === undefined ? {} : { daemon: options.daemon }),
     unreachableHosts,
     unreachableForges,
     ok: unreachableHosts.length === 0 && unreachableForges.length === 0,
@@ -167,4 +195,17 @@ export function livenessFor(row: StatusRow): LivenessState {
   return row.process === 'running' && row.forgeStatus === 'online'
     ? 'online'
     : 'offline';
+}
+
+/**
+ * Liveness from the host alone. The fast tick calls no forge, so every row it
+ * builds reads `unknown` at the forge, and `livenessFor` would call a running
+ * seat offline. This says only what the host said, which is what the fast
+ * tick actually knows.
+ */
+export function hostLivenessFor(row: StatusRow): LivenessState {
+  if (row.process === 'missing') {
+    return 'missing';
+  }
+  return row.process === 'running' ? 'online' : 'offline';
 }

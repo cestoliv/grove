@@ -14,6 +14,15 @@ export type RunnerEventKind =
 
 export type LivenessState = 'online' | 'offline' | 'busy' | 'missing';
 
+export const META_LAST_FAST_TICK = 'last_fast_tick';
+export const META_LAST_FULL_TICK = 'last_full_tick';
+export const META_DAEMON_STARTED_AT = 'daemon_started_at';
+// The pid of the running control loop. It is what `grove status` and `grove
+// daemon status` read to answer "is anything watching this fleet", because the
+// reconciler lock is taken per tick and is absent between them. An empty value
+// means the loop stopped cleanly; a pid whose process is gone means it did not.
+export const META_DAEMON_PID = 'daemon_pid';
+
 export interface RunnerRecord {
   id: number;
   group: string;
@@ -49,6 +58,36 @@ export interface RunnerEvent {
 export interface LivenessSample {
   ts: number;
   state: LivenessState;
+}
+
+export interface RunnerWatch {
+  runnerId: number;
+  busySince: number | null;
+  unregisteredSince: number | null;
+  suspectSince: number | null;
+  suspectReason: string | null;
+}
+
+/**
+ * One job, derived from a busy transition between two full ticks. The
+ * granularity is therefore one full tick, and the outcome is always unknown,
+ * because neither forge tells grove how a job ended without a per-job API
+ * call the spec does not budget for. A duration accurate to plus or minus one
+ * tick is useful. One pretending to be exact is not.
+ */
+export interface JobRecord {
+  id: number;
+  runnerId: number;
+  startedAt: number;
+  endedAt: number | null;
+  durationMs: number | null;
+  outcome: string | null;
+}
+
+export interface PrunedHistory {
+  events: number;
+  liveness: number;
+  jobs: number;
 }
 
 export interface CreateRunnerInput {
@@ -125,6 +164,21 @@ function toRegistration(row: Row): GroupRegistrationRecord {
     createdAt: Number(row.created_at),
     retiredAt: row.retired_at === null ? null : Number(row.retired_at),
   };
+}
+
+function toJob(row: Row): JobRecord {
+  return {
+    id: Number(row.id),
+    runnerId: Number(row.runner_id),
+    startedAt: Number(row.started_at),
+    endedAt: row.ended_at === null ? null : Number(row.ended_at),
+    durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+    outcome: text(row.outcome),
+  };
+}
+
+function number(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
 }
 
 // The database holds a GitLab runner authentication token, so it is no more
@@ -344,6 +398,179 @@ export class StateStore {
       ts: Number(row.ts),
       state: String(row.state) as LivenessState,
     }));
+  }
+
+  getMeta(key: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT value FROM meta WHERE key = ?')
+      .get(key) as Row | undefined;
+    return row === undefined ? undefined : String(row.value);
+  }
+
+  setMeta(key: string, value: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO meta (key, value) VALUES (?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(key, value);
+  }
+
+  // A seat grove has never watched gets an empty watch rather than undefined,
+  // so every caller reads the same shape and none of them branches on it.
+  watchFor(runnerId: number): RunnerWatch {
+    const row = this.db
+      .prepare('SELECT * FROM runner_watch WHERE runner_id = ?')
+      .get(runnerId) as Row | undefined;
+    return {
+      runnerId,
+      busySince: row === undefined ? null : number(row.busy_since),
+      unregisteredSince:
+        row === undefined ? null : number(row.unregistered_since),
+      suspectSince: row === undefined ? null : number(row.suspect_since),
+      suspectReason: row === undefined ? null : text(row.suspect_reason),
+    };
+  }
+
+  setWatch(runnerId: number, watch: Omit<RunnerWatch, 'runnerId'>): void {
+    this.db
+      .prepare(
+        `INSERT INTO runner_watch
+           (runner_id, busy_since, unregistered_since, suspect_since, suspect_reason)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (runner_id) DO UPDATE SET
+           busy_since = excluded.busy_since,
+           unregistered_since = excluded.unregistered_since,
+           suspect_since = excluded.suspect_since,
+           suspect_reason = excluded.suspect_reason`,
+      )
+      .run(
+        runnerId,
+        watch.busySince,
+        watch.unregisteredSince,
+        watch.suspectSince,
+        watch.suspectReason,
+      );
+  }
+
+  /**
+   * Forget every suspicion, keeping the observations the verdicts came from.
+   * `daemon uninstall` calls it, because nothing watches the fleet afterwards
+   * and a suspect nobody will revisit would sit in `grove status` for as long
+   * as the record lives.
+   */
+  clearSuspects(): void {
+    this.db
+      .prepare(
+        'UPDATE runner_watch SET suspect_since = NULL, suspect_reason = NULL',
+      )
+      .run();
+  }
+
+  startJob(runnerId: number, startedAt?: number): JobRecord {
+    const result = this.db
+      .prepare('INSERT INTO jobs (runner_id, started_at) VALUES (?, ?)')
+      .run(runnerId, startedAt ?? this.now());
+    const row = this.db
+      .prepare('SELECT * FROM jobs WHERE id = ?')
+      .get(Number(result.lastInsertRowid)) as Row | undefined;
+    if (row === undefined) {
+      throw new Error(`grove.db lost the job it just opened for ${runnerId}`);
+    }
+    return toJob(row);
+  }
+
+  openJob(runnerId: number): JobRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM jobs WHERE runner_id = ? AND ended_at IS NULL
+         ORDER BY started_at DESC, id DESC LIMIT 1`,
+      )
+      .get(runnerId) as Row | undefined;
+    return row === undefined ? undefined : toJob(row);
+  }
+
+  // The newest open row and no other. A seat whose earlier job never closed
+  // keeps that row open, because inventing an end for it would invent a
+  // duration too.
+  endJob(
+    runnerId: number,
+    outcome: string,
+    endedAt?: number,
+  ): JobRecord | undefined {
+    const open = this.openJob(runnerId);
+    if (open === undefined) {
+      return undefined;
+    }
+    const ended = endedAt ?? this.now();
+    this.db
+      .prepare(
+        'UPDATE jobs SET ended_at = ?, duration_ms = ?, outcome = ? WHERE id = ?',
+      )
+      .run(ended, ended - open.startedAt, outcome, open.id);
+    const row = this.db
+      .prepare('SELECT * FROM jobs WHERE id = ?')
+      .get(open.id) as Row | undefined;
+    return row === undefined ? undefined : toJob(row);
+  }
+
+  jobsFor(runnerId: number, limit = 50): JobRecord[] {
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM jobs WHERE runner_id = ? ORDER BY started_at DESC, id DESC LIMIT ?',
+      )
+      .all(runnerId, limit) as Row[];
+    return rows.map(toJob);
+  }
+
+  countEventsSince(
+    runnerId: number,
+    kind: RunnerEventKind,
+    since: number,
+  ): number {
+    const row = this.db
+      .prepare(
+        'SELECT COUNT(*) AS n FROM events WHERE runner_id = ? AND kind = ? AND ts >= ?',
+      )
+      .get(runnerId, kind, since) as Row | undefined;
+    return Number(row?.n ?? 0);
+  }
+
+  lastEventAt(runnerId: number, kind: RunnerEventKind): number | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT MAX(ts) AS ts FROM events WHERE runner_id = ? AND kind = ?',
+      )
+      .get(runnerId, kind) as Row | undefined;
+    return row?.ts === null || row?.ts === undefined
+      ? undefined
+      : Number(row.ts);
+  }
+
+  /**
+   * Drop history older than the cutoff. Records, registrations and watches
+   * stay, because none of them is history: a record is ownership proof, a
+   * registration holds a token GitLab shows once, and a watch is what the
+   * next tick compares against.
+   */
+  pruneHistory(before: number): PrunedHistory {
+    const events = this.db
+      .prepare('DELETE FROM events WHERE ts < ?')
+      .run(before);
+    const liveness = this.db
+      .prepare('DELETE FROM liveness WHERE ts < ?')
+      .run(before);
+    // An open job is not history. Dropping it would leave the `endJob` a
+    // later tick runs with nothing to close, and grove would lose a job it is
+    // still watching.
+    const jobs = this.db
+      .prepare('DELETE FROM jobs WHERE started_at < ? AND ended_at IS NOT NULL')
+      .run(before);
+    return {
+      events: Number(events.changes),
+      liveness: Number(liveness.changes),
+      jobs: Number(jobs.changes),
+    };
   }
 
   close(): void {

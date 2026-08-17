@@ -139,6 +139,92 @@ export function buildProgram(): Command {
       },
     );
 
+  const daemon = program
+    .command('daemon')
+    .description(
+      'Install, uninstall, run or inspect the control loop that converges the fleet.',
+    );
+
+  daemon
+    .command('install')
+    .description(
+      'Write and load the launchd agent or systemd user unit that runs the control loop.',
+    )
+    .action(async (_options: unknown, command: Command) => {
+      const { runDaemonInstall } = await import('./commands/daemon.js');
+      process.exitCode = await runDaemonInstall({
+        config: command.optsWithGlobals().config,
+      });
+    });
+
+  daemon
+    .command('uninstall')
+    .description(
+      'Unload and remove the launchd agent or systemd user unit. The runners keep running.',
+    )
+    .action(async (_options: unknown, command: Command) => {
+      const { runDaemonUninstall } = await import('./commands/daemon.js');
+      process.exitCode = await runDaemonUninstall({
+        config: command.optsWithGlobals().config,
+      });
+    });
+
+  daemon
+    .command('run')
+    .description(
+      'Run the control loop in the foreground. This is what the installed unit executes.',
+    )
+    .action(async (_options: unknown, command: Command) => {
+      const { runDaemonRun } = await import('./commands/daemon.js');
+      process.exitCode = await runDaemonRun({
+        config: command.optsWithGlobals().config,
+      });
+    });
+
+  daemon
+    .command('tail')
+    .description("Read the daemon's append-only log in the state directory.")
+    .option(
+      '-n, --lines <count>',
+      'How many lines to print first',
+      String(DEFAULT_TAIL),
+    )
+    .option('-f, --follow', 'Stream new lines as they arrive')
+    .action(
+      async (
+        options: { lines?: string; follow?: boolean },
+        command: Command,
+      ) => {
+        const lines =
+          options.lines === undefined ? DEFAULT_TAIL : parseTail(options.lines);
+        if (lines === undefined) {
+          console.error(
+            `-n wants a whole number of lines, not "${options.lines}".`,
+          );
+          process.exitCode = EXIT_INVALID_CONFIG;
+          return;
+        }
+        const { runDaemonTail } = await import('./commands/daemon.js');
+        process.exitCode = await runDaemonTail({
+          config: command.optsWithGlobals().config,
+          lines,
+          ...(options.follow === undefined ? {} : { follow: options.follow }),
+        });
+      },
+    );
+
+  daemon
+    .command('status')
+    .description(
+      'Print whether the control loop is installed, whether it is running, and when it last ran.',
+    )
+    .action(async (_options: unknown, command: Command) => {
+      const { runDaemonStatus } = await import('./commands/daemon.js');
+      process.exitCode = await runDaemonStatus({
+        config: command.optsWithGlobals().config,
+      });
+    });
+
   program
     .command('config')
     .description(

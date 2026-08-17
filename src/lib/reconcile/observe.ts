@@ -31,6 +31,10 @@ export interface ObserveOptions {
   // so every forge call in a reconcile pass is queued behind one cap. Absent
   // a caller, a listRunners call just runs.
   forgeLimit?: <T>(fn: () => Promise<T>) => Promise<T>;
+  // The fast tick is liveness only, so it asks no forge anything. The host
+  // half of the pass stays whole, because the absent-disk guard runs before
+  // every start and a start is the only thing a fast tick does.
+  skipForges?: boolean;
 }
 
 function unreachable(host: string, reason: string): HostObservation {
@@ -44,16 +48,19 @@ function scopeKey(scope: Scope): string {
 }
 
 // Groups grove can act on today: a Docker group, or a native group on a
-// GitHub forge. Either way a forge client has to exist for it. A group whose
-// client is missing is silently absent from this list, which is what keeps
-// `logs` working with no token at all.
+// GitHub forge. A pass that will call a forge also needs that forge's client
+// to exist, and a group whose client is missing is silently absent from this
+// list, which is what keeps `logs` working with no token at all. A pass that
+// will call no forge (skipForges) needs no client to decide that a group is
+// grove's to look at.
 function manageableGroups(
   config: GroveConfig,
   forgeClients: ReadonlyMap<string, ForgeClient>,
+  skipForges: boolean,
 ): GroupConfig[] {
   return config.groups.filter(
     (group) =>
-      forgeClients.has(group.forge) &&
+      (skipForges || forgeClients.has(group.forge)) &&
       (group.stack === 'docker' ||
         config.forges[group.forge]?.kind === 'github'),
   );
@@ -211,7 +218,8 @@ export async function observeFleet(
   config: GroveConfig,
   options: ObserveOptions,
 ): Promise<ObservedState> {
-  const groups = manageableGroups(config, options.forgeClients);
+  const skipForges = options.skipForges === true;
+  const groups = manageableGroups(config, options.forgeClients, skipForges);
   const forgeLimit = options.forgeLimit ?? (<T>(fn: () => Promise<T>) => fn());
 
   const groupsByHost = new Map<string, GroupConfig[]>();
@@ -249,12 +257,16 @@ export async function observeFleet(
     }),
   );
 
-  const forgeNames = [...scopesByForge.keys()];
+  // An empty array is what the planner reads as "no forge was observed on
+  // this pass", which already blocks every create and every removal. That is
+  // exactly the fast tick's contract.
+  const forgeNames = skipForges ? [] : [...scopesByForge.keys()];
   const forges = await Promise.all(
     forgeNames.map((name) =>
       observeForge(
         name,
-        // manageableGroups already proved the client is there.
+        // skipForges is false here, and manageableGroups required the client
+        // to be present for every group that fed scopesByForge in that case.
         options.forgeClients.get(name) as ForgeClient,
         scopesByForge.get(name) ?? [],
         forgeLimit,

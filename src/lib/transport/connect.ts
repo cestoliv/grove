@@ -8,7 +8,13 @@ export interface ConnectOptions {
   ssh?: SshTransportOptions;
 }
 
-export type ConnectFn = (name: string, host: HostConfig) => Transport;
+// The third parameter is optional, so every caller and every test double that
+// takes two arguments still satisfies it.
+export type ConnectFn = (
+  name: string,
+  host: HostConfig,
+  options?: ConnectOptions,
+) => Transport;
 
 export function connect(
   name: string,

@@ -1348,4 +1348,151 @@ describe('executeActions, a native seat', () => {
     });
     expect(result.failed[0].error).toMatch(/no transport was opened/);
   });
+
+  it('drives a native seat through the supervisor, keeping the install dir', async () => {
+    const recordId = store.createRunner({
+      group: 'ios',
+      index: 1,
+      host: 'mac',
+      forge: 'gh-overload',
+      name: 'grove-ios-1',
+      stack: 'native',
+    }).id;
+    const transport = new FakeTransport('mac');
+
+    const result = await executeActions(
+      [
+        {
+          kind: 'restart-runner',
+          host: 'mac',
+          name: 'grove-ios-1',
+          stack: 'native',
+          recordId,
+          reason: 'wedged',
+          destructive: true,
+        },
+      ],
+      nativeContext(transport, new FakeForgeClient('gh-overload')),
+    );
+
+    expect(result.failed).toEqual([]);
+    const lines = transport.commandLines();
+    expect(lines.some((line) => line.startsWith('launchctl bootout'))).toBe(
+      true,
+    );
+    expect(lines.some((line) => line.startsWith('launchctl kickstart'))).toBe(
+      true,
+    );
+    const prepare = lines.find((line) => line.includes('mkdir -p')) ?? '';
+    // The work dir goes, the unpacked runner and its credentials stay. The
+    // mkdir names the install dir, so only the rm is asserted on.
+    expect(prepare).toContain("rm -rf '/Volumes/ci/grove/ios-1' &&");
+    expect(prepare).not.toContain("rm -rf '/Volumes/ci/grove/ios-1-runner'");
+    expect(store.eventsFor(recordId).map((event) => event.kind)).toEqual([
+      'restarted',
+    ]);
+  });
+});
+
+describe('restart-runner', () => {
+  function record(): number {
+    return store.createRunner({
+      group: 'overload-arm',
+      index: 1,
+      host: 'mac',
+      forge: 'gh-overload',
+      name: 'grove-overload-arm-1',
+    }).id;
+  }
+
+  it('stops with no drain, wipes the work dir and starts again', async () => {
+    const recordId = record();
+    const transport = new FakeTransport('mac');
+    const client = new FakeForgeClient('gh-overload');
+
+    const result = await executeActions(
+      [
+        {
+          kind: 'restart-runner',
+          host: 'mac',
+          name: 'grove-overload-arm-1',
+          recordId,
+          reason: 'busy for 118m with a quiet work dir',
+          destructive: true,
+        },
+      ],
+      context(transport, client),
+    );
+
+    expect(result.failed).toEqual([]);
+    const lines = transport.commandLines();
+    expect(lines).toContain('docker stop -t 0 grove-overload-arm-1');
+    expect(
+      lines.some((line) =>
+        line.includes("rm -rf '/Volumes/ci/grove/overload-arm-1'"),
+      ),
+    ).toBe(true);
+    expect(lines).toContain('docker start grove-overload-arm-1');
+    // The order matters. A start before the wipe would run against the state
+    // the restart is trying to throw away.
+    expect(lines.indexOf('docker stop -t 0 grove-overload-arm-1')).toBeLessThan(
+      lines.indexOf('docker start grove-overload-arm-1'),
+    );
+
+    expect(
+      store.eventsFor(recordId).map((event) => [event.kind, event.reason]),
+    ).toEqual([['restarted', 'busy for 118m with a quiet work dir']]);
+  });
+
+  it('never calls the forge, because the seat keeps the registration it holds', async () => {
+    const recordId = record();
+    const client = new FakeForgeClient('gh-overload');
+
+    await executeActions(
+      [
+        {
+          kind: 'restart-runner',
+          host: 'mac',
+          name: 'grove-overload-arm-1',
+          recordId,
+          reason: 'wedged',
+          destructive: true,
+        },
+      ],
+      context(new FakeTransport('mac'), client),
+    );
+
+    expect(client.registrations).toEqual([]);
+    expect(client.deleted).toEqual([]);
+  });
+
+  it('fails without stopping anything when the host has left the config', async () => {
+    const recordId = record();
+    const transport = new FakeTransport('mac');
+
+    const result = await executeActions(
+      [
+        {
+          kind: 'restart-runner',
+          host: 'mac',
+          name: 'grove-overload-arm-1',
+          recordId,
+          reason: 'wedged',
+          destructive: true,
+        },
+      ],
+      {
+        ...context(transport, new FakeForgeClient('gh-overload')),
+        config: { ...config(), hosts: {} } as GroveConfig,
+      },
+    );
+
+    expect(result.failed[0].error).toMatch(
+      /host "mac" is no longer in the config/,
+    );
+    // The directories are derived before the stop, so a seat grove cannot
+    // place is left running rather than taken down and stranded.
+    expect(transport.calls).toEqual([]);
+    expect(store.eventsFor(recordId)).toEqual([]);
+  });
 });

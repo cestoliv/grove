@@ -264,3 +264,49 @@ groups:
     }
   });
 });
+
+describe('openFleet ssh options', () => {
+  it('hands the connect function the ssh options it was given', async () => {
+    const path = await write();
+    const seen: unknown[] = [];
+    const transports = fakeTransports();
+    const fleet = await openFleet({
+      config: path,
+      env: {},
+      store,
+      ssh: { controlPersist: '180' },
+      connect: (name, _host, options) => {
+        seen.push(options);
+        return transports[name];
+      },
+      resolveToken: async () => 'token',
+      createForgeClient: (name) => new FakeForgeClient(name),
+    });
+    await fleet.close();
+
+    // One entry per host, so nothing takes the default by accident.
+    expect(seen).toEqual([
+      { ssh: { controlPersist: '180' } },
+      { ssh: { controlPersist: '180' } },
+    ]);
+  });
+
+  it('passes nothing when the caller asked for nothing', async () => {
+    const path = await write();
+    const seen: unknown[] = [];
+    const transports = fakeTransports();
+    const fleet = await openFleet({
+      config: path,
+      env: {},
+      store,
+      connect: (name, _host, options) => {
+        seen.push(options);
+        return transports[name];
+      },
+      resolveToken: async () => 'token',
+      createForgeClient: (name) => new FakeForgeClient(name),
+    });
+    await fleet.close();
+    expect(seen).toEqual([undefined, undefined]);
+  });
+});

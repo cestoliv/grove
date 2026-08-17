@@ -20,11 +20,48 @@ describe('buildProgram', () => {
     expect(names).toEqual([
       'apply',
       'config',
+      'daemon',
       'logs',
       'plan',
       'status',
       'teardown',
     ]);
+  });
+
+  it('gives the daemon command its five subcommands', () => {
+    const daemon = buildProgram().commands.find(
+      (command) => command.name() === 'daemon',
+    );
+    expect(daemon?.commands.map((command) => command.name()).sort()).toEqual([
+      'install',
+      'run',
+      'status',
+      'tail',
+      'uninstall',
+    ]);
+  });
+
+  it('describes every daemon subcommand, so grove daemon --help is useful', () => {
+    const daemon = buildProgram().commands.find(
+      (command) => command.name() === 'daemon',
+    );
+    for (const command of daemon?.commands ?? []) {
+      expect(command.description().length).toBeGreaterThan(10);
+    }
+  });
+
+  it('gives daemon tail an -n and a --follow', () => {
+    const daemon = buildProgram().commands.find(
+      (command) => command.name() === 'daemon',
+    );
+    const tail = daemon?.commands.find((command) => command.name() === 'tail');
+    const flags = tail?.options.map((option) => option.flags) ?? [];
+    expect(flags).toContain('-n, --lines <count>');
+    expect(flags).toContain('-f, --follow');
+    expect(
+      tail?.options.find((option) => option.flags === '-n, --lines <count>')
+        ?.defaultValue,
+    ).toBe(String(DEFAULT_TAIL));
   });
 
   it('accepts --config as a global option', () => {
@@ -134,6 +171,24 @@ describe('buildProgram, run end to end', () => {
     expect(process.exitCode).toBe(2);
     expect(errors.join('\n')).toBe(
       '--tail wants a whole number of lines, not "abc".',
+    );
+  });
+
+  it('refuses a -n that is not a whole number and opens nothing', async () => {
+    const errors: string[] = [];
+    const spy = console.error;
+    console.error = (text: string) => errors.push(text);
+    try {
+      await buildProgram().parseAsync(['daemon', 'tail', '-n', 'abc'], {
+        from: 'user',
+      });
+    } finally {
+      console.error = spy;
+    }
+
+    expect(process.exitCode).toBe(2);
+    expect(errors.join('\n')).toBe(
+      '-n wants a whole number of lines, not "abc".',
     );
   });
 });
