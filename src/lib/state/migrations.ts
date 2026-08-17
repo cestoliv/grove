@@ -76,6 +76,19 @@ export const MIGRATIONS: string[] = [
   -- from another, because the managers endpoint exposes no name.
   ALTER TABLE runners ADD COLUMN system_id TEXT;
   `,
+  `
+  -- Where a native seat put its files. A group that leaves the config takes
+  -- the work root and the install path with it, and the teardown that follows
+  -- still has to find the runner release and the launchd plist to remove.
+  -- Null for a container, which unpacks nothing on the host.
+  ALTER TABLE runners ADD COLUMN install_dir TEXT;
+  ALTER TABLE runners ADD COLUMN work_dir TEXT;
+
+  -- Which supervisor runs this seat. A group that switches stack under a
+  -- running seat leaves a record whose seat is on the old one, and only the
+  -- record can say where to go and take it down.
+  ALTER TABLE runners ADD COLUMN stack TEXT NOT NULL DEFAULT 'docker';
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

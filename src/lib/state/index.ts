@@ -11,6 +11,7 @@ export {
   type GroupRegistrationRecord,
   type LivenessSample,
   type LivenessState,
+  type RunnerDirsInput,
   type RunnerEvent,
   type RunnerEventKind,
   type RunnerRecord,

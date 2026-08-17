@@ -96,6 +96,7 @@ export interface ConfirmAndExecuteOptions {
   input?: NodeJS.ReadableStream;
   write: (text: string) => void;
   writeError: (text: string) => void;
+  nativePollIntervalMs?: number;
 }
 
 // Two ways out that are not an execution: the operator asked to see the plan
@@ -140,9 +141,14 @@ export async function confirmAndExecute(
     config: fleet.loaded.config,
     hosts: new Map(observed.hosts.map((entry) => [entry.host, entry])),
     stacks: fleet.stacks,
+    transports: fleet.transports,
     forgeClients: fleet.forgeClients,
     store: fleet.store,
+    resolveRunnerVersion: fleet.runnerVersion,
     log: (line) => options.write(`  ${line}`),
+    ...(options.nativePollIntervalMs === undefined
+      ? {}
+      : { nativePollIntervalMs: options.nativePollIntervalMs }),
     ...(options.clean === undefined ? {} : { clean: options.clean }),
     ...(options.force === undefined ? {} : { force: options.force }),
   });

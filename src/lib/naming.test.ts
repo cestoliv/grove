@@ -4,14 +4,21 @@ import {
   containerName,
   DEFAULT_WORK_ROOT,
   isManagedName,
+  launchdLabel,
+  launchdPlistPath,
   parseManagedName,
   parseSharedName,
   resolveCacheRoot,
   resolveWorkRoot,
   runnerConfigDir,
   runnerDir,
+  runnerInstallDir,
   runnerName,
+  runnerNameFromLaunchdLabel,
+  runnerNameFromSystemdUnit,
   sharedRunnerName,
+  systemdUnit,
+  systemdUnitPath,
 } from './naming.js';
 
 const host = { type: 'local' } as HostConfig;
@@ -149,5 +156,59 @@ describe('runnerConfigDir', () => {
     expect(runnerConfigDir('/PROD/local/grove/', 'chevro-dind', 1)).toBe(
       '/PROD/local/grove/chevro-dind-1-config',
     );
+  });
+});
+
+describe('native seat names', () => {
+  it('builds the launchd label and the systemd unit from the group and index', () => {
+    expect(launchdLabel('overload-arm', 1)).toBe(
+      'com.cestoliv.grove.overload-arm-1',
+    );
+    expect(systemdUnit('overload-arm', 1)).toBe('grove-overload-arm-1.service');
+  });
+
+  it('places the plist and the unit file under the runner user home', () => {
+    expect(launchdPlistPath('/Users/olivier', 'ios', 2)).toBe(
+      '/Users/olivier/Library/LaunchAgents/com.cestoliv.grove.ios-2.plist',
+    );
+    expect(systemdUnitPath('/home/ci', 'ios', 2)).toBe(
+      '/home/ci/.config/systemd/user/grove-ios-2.service',
+    );
+  });
+
+  it('trims a trailing slash off the home it was given', () => {
+    expect(launchdPlistPath('/Users/olivier/', 'ios', 1)).toBe(
+      '/Users/olivier/Library/LaunchAgents/com.cestoliv.grove.ios-1.plist',
+    );
+    expect(systemdUnitPath('/home/ci/', 'ios', 1)).toBe(
+      '/home/ci/.config/systemd/user/grove-ios-1.service',
+    );
+  });
+
+  it('puts the install dir beside the work dir, never inside it', () => {
+    expect(runnerInstallDir('/Volumes/ci/grove', 'ios', 1)).toBe(
+      '/Volumes/ci/grove/ios-1-runner',
+    );
+    expect(runnerDir('/Volumes/ci/grove', 'ios', 1)).toBe(
+      '/Volumes/ci/grove/ios-1',
+    );
+  });
+
+  it('reads a runner name back out of a launchd label', () => {
+    expect(runnerNameFromLaunchdLabel('com.cestoliv.grove.ios-1')).toBe(
+      'grove-ios-1',
+    );
+    expect(runnerNameFromLaunchdLabel('com.apple.Safari')).toBeNull();
+    // The daemon of milestone 5 shares the prefix and is not a seat.
+    expect(runnerNameFromLaunchdLabel('com.cestoliv.grove.daemon')).toBeNull();
+  });
+
+  it('reads a runner name back out of a systemd unit', () => {
+    expect(runnerNameFromSystemdUnit('grove-ios-1.service')).toBe(
+      'grove-ios-1',
+    );
+    expect(runnerNameFromSystemdUnit('grove-daemon.service')).toBeNull();
+    expect(runnerNameFromSystemdUnit('docker.service')).toBeNull();
+    expect(runnerNameFromSystemdUnit('grove-ios-1')).toBeNull();
   });
 });

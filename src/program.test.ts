@@ -78,6 +78,14 @@ describe('buildProgram', () => {
       expect(command.description().length).toBeGreaterThan(10);
     }
   });
+
+  it('says the logs command reads both stacks', () => {
+    const logs = buildProgram().commands.find(
+      (command) => command.name() === 'logs',
+    );
+    expect(logs?.description()).toContain('Docker');
+    expect(logs?.description()).toContain('host');
+  });
 });
 
 describe('buildProgram, run end to end', () => {

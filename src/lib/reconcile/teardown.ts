@@ -1,4 +1,4 @@
-import type { GroveConfig } from '../config/index.js';
+import type { GroveConfig, StackKind } from '../config/index.js';
 import { DEFAULT_DRAIN_TIMEOUT_MS } from '../stack/index.js';
 import type { GroupRegistrationRecord, RunnerRecord } from '../state/index.js';
 import type { Action } from './actions.js';
@@ -6,6 +6,7 @@ import {
   describeWhere,
   type ForgeObservation,
   flattenObserved,
+  hostStackError,
   type ObservedState,
 } from './observed.js';
 import { classifyRunners, isDestroyable } from './ownership.js';
@@ -135,6 +136,22 @@ export function planTeardown(
         });
         continue;
       }
+      // Nothing was seen anywhere, and only the supervisor the record names
+      // can turn that into absence. While it is blind the record stays.
+      const blind = hostStackError(
+        observation,
+        entry.record?.stack ?? 'docker',
+      );
+      if (blind !== undefined) {
+        degraded.push({
+          kind: 'report-degraded',
+          target: entry.name,
+          ...(host === undefined ? {} : { host }),
+          reason: blind,
+          destructive: false,
+        });
+        continue;
+      }
       const recordForge = entry.record?.forge;
       if (recordForge !== undefined) {
         const blocked = forgeGuard(
@@ -175,6 +192,16 @@ export function planTeardown(
     // has a record for always has one, so an unreachable host below stops the
     // deregistration too, rather than stranding a container nobody can find.
     const host = entry.host ?? entry.record?.host;
+    // The host is authoritative, so a sighting decides which stack this seat
+    // runs on. A seat with no sighting is read through the supervisor its
+    // record names, because that is the only one that can prove it is gone.
+    const stack: StackKind =
+      entry.native !== undefined
+        ? 'native'
+        : entry.container !== undefined
+          ? 'docker'
+          : (entry.record?.stack ?? 'docker');
+    const present = entry.native !== undefined || entry.container !== undefined;
     if (host !== undefined) {
       const observation = hosts.get(host);
       if (observation === undefined || !observation.reachable) {
@@ -186,6 +213,19 @@ export function planTeardown(
             observation === undefined
               ? `host "${host}" was not observed on this pass, so grove leaves this runner and its forge record alone`
               : `host "${host}" is unreachable, so grove leaves this runner and its forge record alone`,
+          destructive: false,
+        });
+        continue;
+      }
+      // Only this seat's own supervisor holds the removal back. The other one
+      // can be blind without saying anything about this seat.
+      const blind = hostStackError(observation, stack);
+      if (blind !== undefined) {
+        degraded.push({
+          kind: 'report-degraded',
+          target: entry.name,
+          host,
+          reason: blind,
           destructive: false,
         });
         continue;
@@ -223,11 +263,12 @@ export function planTeardown(
 
     const drainTimeoutMs = drainByGroup.get(entry.group ?? '') ?? fallbackDrain;
 
-    if (entry.container !== undefined && host !== undefined) {
+    if (present && host !== undefined) {
       removals.push({
         kind: 'stop-container',
         host,
         name: entry.name,
+        ...(stack === 'native' ? { stack } : {}),
         ...(entry.record === undefined ? {} : { recordId: entry.record.id }),
         drainTimeoutMs,
         destructive: true,
@@ -263,11 +304,12 @@ export function planTeardown(
         destructive: true,
       });
     }
-    if (entry.container !== undefined && host !== undefined) {
+    if (present && host !== undefined) {
       removals.push({
         kind: 'remove-container',
         host,
         name: entry.name,
+        ...(stack === 'native' ? { stack } : {}),
         ...(entry.record === undefined ? {} : { recordId: entry.record.id }),
         destructive: true,
       });

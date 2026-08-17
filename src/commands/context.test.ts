@@ -207,3 +207,60 @@ describe('openFleet', () => {
     await fleet.close();
   });
 });
+
+describe('openFleet, native groups', () => {
+  const NATIVE_CONFIG = `
+hosts:
+  mac: { type: local }
+
+forges:
+  gh-overload: { kind: github }
+
+groups:
+  - name: ios
+    forge: gh-overload
+    scope: { level: organization, target: Overload-coach }
+    placement: { host: mac, count: 1 }
+    stack: native
+    labels: [macos]
+`;
+
+  it('opens a client for a native GitHub group', async () => {
+    const path = join(dir, 'grove.yaml');
+    await writeFile(path, NATIVE_CONFIG, 'utf8');
+    const fleet = await openFleet({
+      config: path,
+      env: {},
+      store,
+      connect: () => new FakeTransport('mac'),
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
+    });
+
+    try {
+      expect([...fleet.forgeClients.keys()]).toEqual(['gh-overload']);
+    } finally {
+      await fleet.close();
+    }
+  });
+
+  it('carries one runner version resolver for the whole run', async () => {
+    const path = join(dir, 'grove.yaml');
+    await writeFile(path, NATIVE_CONFIG, 'utf8');
+    const fleet = await openFleet({
+      config: path,
+      env: {},
+      store,
+      connect: () => new FakeTransport('mac'),
+      resolveToken: async () => 'token',
+      createForgeClient: (name: string) => new FakeForgeClient(name),
+      resolveRunnerVersion: async () => '2.328.0',
+    });
+
+    try {
+      expect(await fleet.runnerVersion()).toBe('2.328.0');
+    } finally {
+      await fleet.close();
+    }
+  });
+});

@@ -13,8 +13,6 @@ import {
 } from './gitlab-args.js';
 import { type DockerContainer, StackError } from './types.js';
 
-export const DEFAULT_DRAIN_TIMEOUT_MS = 120_000;
-
 export interface DockerStackOptions {
   transport: Transport;
   host: string;

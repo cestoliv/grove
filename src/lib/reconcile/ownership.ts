@@ -1,7 +1,7 @@
-import type { Scope } from '../config/index.js';
+import type { Scope, StackKind } from '../config/index.js';
 import type { ForgeRunner } from '../forge/index.js';
 import { parseManagedName } from '../naming.js';
-import type { DockerContainer } from '../stack/index.js';
+import type { DockerContainer, NativeUnit } from '../stack/index.js';
 import type { RunnerRecord } from '../state/index.js';
 
 export type OwnershipClass =
@@ -15,6 +15,8 @@ export interface ObservedRunner {
   host?: string;
   forge?: string;
   container?: DockerContainer;
+  // The supervisor's answer for a native seat, the twin of `container`.
+  native?: NativeUnit;
   forgeRunner?: ForgeRunner;
   scope?: Scope;
 }
@@ -36,10 +38,22 @@ interface NameSightings {
   unplaced: ObservedRunner[];
 }
 
+// A container and a unit of one name on one host are two seats, not one. The
+// supervisor is part of the place a sighting came from, so a record claims the
+// seat its own stack holds and the other one is reported as unmanaged.
+function hostKey(host: string, stack: StackKind): string {
+  return `${host} ${stack}`;
+}
+
+function stackOf(entry: ObservedRunner): StackKind {
+  return entry.native === undefined ? 'docker' : 'native';
+}
+
 function merge(target: ObservedRunner, source: ObservedRunner): void {
   target.host ??= source.host;
   target.forge ??= source.forge;
   target.container ??= source.container;
+  target.native ??= source.native;
   target.forgeRunner ??= source.forgeRunner;
   target.scope ??= source.scope;
 }
@@ -59,7 +73,10 @@ function place(sightings: NameSightings, entry: ObservedRunner): void {
     sightings.unplaced.push({ ...entry });
     return;
   }
-  const key = (entry.host ?? entry.forge) as string;
+  const key =
+    entry.host === undefined
+      ? (entry.forge as string)
+      : hostKey(entry.host, stackOf(entry));
   const existing = bucket.get(key);
   if (existing === undefined) {
     bucket.set(key, { ...entry });
@@ -101,9 +118,10 @@ export function classifyRunners(
       // of those two places is the runner it created. A same-named sighting
       // anywhere else is a collision, so it stays out of this entry and no
       // destructive step ever reads the record's fields off it.
-      const onHost = sightings.onHosts.get(record.host);
+      const seatKey = hostKey(record.host, record.stack);
+      const onHost = sightings.onHosts.get(seatKey);
       const atForge = sightings.atForges.get(record.forge);
-      sightings.onHosts.delete(record.host);
+      sightings.onHosts.delete(seatKey);
       sightings.atForges.delete(record.forge);
 
       const claimed: ObservedRunner = {

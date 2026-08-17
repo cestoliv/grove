@@ -7,6 +7,9 @@ import {
   checkWorkRootVolume,
   type DockerContainer,
   DockerStack,
+  NativeStack,
+  type NativeUnit,
+  readUid,
   type SystemIdTarget,
   type VolumeCheck,
 } from '../stack/index.js';
@@ -40,15 +43,19 @@ function scopeKey(scope: Scope): string {
   return 'target' in scope ? `${scope.level}:${scope.target}` : scope.level;
 }
 
-// Groups grove can act on today: Docker stack, and a forge client was built
-// for their forge. A group whose client is missing is silently absent from
-// this list, which is what keeps `logs` working with no token at all.
+// Groups grove can act on today: a Docker group, or a native group on a
+// GitHub forge. Either way a forge client has to exist for it. A group whose
+// client is missing is silently absent from this list, which is what keeps
+// `logs` working with no token at all.
 function manageableGroups(
   config: GroveConfig,
   forgeClients: ReadonlyMap<string, ForgeClient>,
 ): GroupConfig[] {
   return config.groups.filter(
-    (group) => group.stack === 'docker' && forgeClients.has(group.forge),
+    (group) =>
+      forgeClients.has(group.forge) &&
+      (group.stack === 'docker' ||
+        config.forges[group.forge]?.kind === 'github'),
   );
 }
 
@@ -64,20 +71,46 @@ async function observeHost(
     return unreachable(name, probe.reason ?? 'unreachable');
   }
 
-  // One try/catch for everything past the probe. A rejection from any exec
-  // here (home read, docker ps, or a stat behind the volume guard) means
-  // grove cannot trust what it saw on this host, which is exactly when
-  // deleting a forge record would be wrong. Other hosts stay unaffected,
-  // because each runs through its own observeHost call.
+  // One try/catch for the reads that decide whether grove understood this
+  // host at all: the home, the volume guard, and the GitLab system ids. A
+  // rejection there means grove cannot trust what it saw, which is exactly
+  // when deleting a forge record would be wrong. The two stack queries below
+  // sit outside it, because a host that runs one stack and not the other is
+  // a normal host rather than a broken one.
   try {
     const homeResult = await transport.exec('sh', ['-c', HOME_COMMAND]);
+    // Everything grove derives from the home is an absolute path a supervisor
+    // reads, and no transport expands a tilde or a relative path. A host that
+    // answers with anything else has no home grove can use.
+    const homeAnswer = homeResult.stdout.trim();
     const home =
-      homeResult.code === 0 && homeResult.stdout.trim() !== ''
-        ? homeResult.stdout.trim()
+      homeResult.code === 0 && homeAnswer.startsWith('/')
+        ? homeAnswer
         : undefined;
+    const uid = await readUid(transport);
 
     const stack = new DockerStack({ transport, host: name });
-    const containers: DockerContainer[] = await stack.listContainers();
+    let containers: DockerContainer[] = [];
+    let containersError: string | undefined;
+    try {
+      containers = await stack.listContainers();
+    } catch (error) {
+      containersError = errorMessage(error);
+    }
+
+    const native = new NativeStack({
+      transport,
+      host: name,
+      platform: probe.platform ?? 'Linux',
+      ...(uid === undefined ? {} : { uid }),
+    });
+    let natives: NativeUnit[] | undefined;
+    let nativesError: string | undefined;
+    try {
+      natives = await native.listUnits();
+    } catch (error) {
+      nativesError = errorMessage(error);
+    }
 
     const workRoots: Record<string, VolumeCheck> = {};
     for (const group of groups) {
@@ -126,7 +159,11 @@ async function observeHost(
       ...(probe.platform === undefined ? {} : { platform: probe.platform }),
       ...(probe.arch === undefined ? {} : { arch: probe.arch }),
       ...(home === undefined ? {} : { home }),
+      ...(uid === undefined ? {} : { uid }),
       containers,
+      ...(containersError === undefined ? {} : { containersError }),
+      ...(natives === undefined ? {} : { natives }),
+      ...(nativesError === undefined ? {} : { nativesError }),
       workRoots,
       ...(Object.keys(systemIds).length === 0 ? {} : { systemIds }),
     };

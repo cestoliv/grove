@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Action } from './actions.js';
-import { describeAction, hasDestructive, isReport } from './actions.js';
+import {
+  actionStack,
+  describeAction,
+  hasDestructive,
+  isReport,
+} from './actions.js';
 
 const scope = { level: 'organization', target: 'Overload-coach' } as const;
 
@@ -146,5 +151,99 @@ describe('create-runner with a renewed registration', () => {
   it('leaves a plain create alone', () => {
     expect(describeAction(create)).not.toContain('renewing');
     expect(hasDestructive([create])).toBe(false);
+  });
+});
+
+describe('actionStack', () => {
+  it('reads Docker out of an action that names no stack', () => {
+    expect(
+      actionStack({
+        kind: 'start-container',
+        host: 'mac',
+        name: 'grove-overload-arm-1',
+        destructive: false,
+      }),
+    ).toBe('docker');
+  });
+
+  it('reads the stack an action names', () => {
+    expect(
+      actionStack({
+        kind: 'start-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        destructive: false,
+      }),
+    ).toBe('native');
+  });
+
+  it('answers docker for an action that has no stack at all', () => {
+    expect(
+      actionStack({
+        kind: 'retire-record',
+        name: 'grove-ios-1',
+        recordId: 1,
+        destructive: true,
+      }),
+    ).toBe('docker');
+  });
+});
+
+describe('describeAction, native seats', () => {
+  it('says which stack, but only when it is not the default one', () => {
+    expect(
+      describeAction({
+        kind: 'start-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        destructive: false,
+      }),
+    ).toBe('start       grove-ios-1  on mac, native');
+    expect(
+      describeAction({
+        kind: 'start-container',
+        host: 'mac',
+        name: 'grove-overload-arm-1',
+        destructive: false,
+      }),
+    ).toBe('start       grove-overload-arm-1  on mac');
+  });
+
+  it('names the stack on a drain, a removal and a create', () => {
+    expect(
+      describeAction({
+        kind: 'stop-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        drainTimeoutMs: 120_000,
+        destructive: true,
+      }),
+    ).toBe('drain       grove-ios-1  on mac, up to 120s, native');
+    expect(
+      describeAction({
+        kind: 'remove-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        destructive: true,
+      }),
+    ).toBe('remove      grove-ios-1  on mac, native');
+    expect(
+      describeAction({
+        kind: 'create-runner',
+        host: 'mac',
+        forge: 'gh-overload',
+        group: 'ios',
+        index: 1,
+        name: 'grove-ios-1',
+        stack: 'native',
+        destructive: false,
+      }),
+    ).toBe(
+      'create      grove-ios-1  on mac, registering at gh-overload, native',
+    );
   });
 });

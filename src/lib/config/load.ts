@@ -7,7 +7,11 @@ import { interpolateEnv } from './interpolate.js';
 import { resolveConfigPath } from './paths.js';
 import { validateReferences } from './references.js';
 import { configSchema, DEFAULT_TICK, type GroveConfig } from './schema.js';
-import { type ConfigWarning, privilegedSocketWarnings } from './warnings.js';
+import {
+  type ConfigWarning,
+  nativeOptionWarnings,
+  privilegedSocketWarnings,
+} from './warnings.js';
 
 export interface LoadedConfig {
   path: string;
@@ -111,6 +115,9 @@ export async function loadConfig(
   return {
     path: configPath,
     config,
-    warnings: privilegedSocketWarnings(config),
+    warnings: [
+      ...privilegedSocketWarnings(config),
+      ...nativeOptionWarnings(config),
+    ],
   };
 }

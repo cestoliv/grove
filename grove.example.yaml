@@ -57,14 +57,18 @@ groups:
       job_image: docker:27       # the image a job gets when it names none
 
   - name: ios
-    forge: gh-overload
+    forge: gh-overload           # native runs on GitHub forges only
     scope: { level: organization, target: Overload-coach }
     placement: { host: mac, count: 1 }
-    stack: native
+    stack: native                # a process on the host, no container
     labels: [macos, xcode]
     work_root: ~/ci/ios          # this group overrides the host default
     max_job_duration: 90m
     max_work_size: 120G
+    raw:
+      runner_version: "2.328.0"  # pin it, or leave it out to take the latest
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
 
   - name: api-repo
     forge: gh-overload
