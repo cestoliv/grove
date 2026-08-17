@@ -38,6 +38,12 @@ import {
   EXIT_UNREACHABLE,
 } from '../lib/exit-codes.js';
 import { DEFAULT_TAIL } from '../lib/log-defaults.js';
+import {
+  createCollector,
+  type MetricsServer,
+  MetricsState,
+  startMetricsServer,
+} from '../lib/metrics/index.js';
 import { readUid } from '../lib/stack/index.js';
 import {
   META_DAEMON_PID,
@@ -100,6 +106,8 @@ export interface DaemonRunOptions
   isPidAlive?: (pid: number) => boolean;
   pid?: number;
   nativePollIntervalMs?: number;
+  // Only a test injects one. The daemon builds its own.
+  metricsState?: MetricsState;
 }
 
 export async function runDaemonRun(
@@ -166,6 +174,71 @@ export async function runDaemonRun(
       : EXIT_UNREACHABLE;
   }
 
+  const metricsState = options.metricsState ?? new MetricsState();
+  let metricsServer: MetricsServer | undefined;
+  let metricsListen: string | undefined;
+  // One line per transition, like the lock's `skipping` flag below. A port
+  // taken for good is retried on every fast tick, and logging each attempt
+  // would fill grove.log faster than anything else the daemon writes.
+  let bindFailedFor: string | undefined;
+
+  // Everything the collector reads is a thunk over the mutable `fleet`, so
+  // reopening the fleet needs no rebuild and no rebind, and a scrape landing
+  // mid-reopen reads the new store rather than the closed one.
+  const collector = createCollector({
+    state: metricsState,
+    store: () => fleet.store,
+    config: () => fleet.loaded.config,
+    transports: () => fleet.transports,
+    version: __VERSION__,
+  });
+
+  // The config is reloaded before every tick, so the exporter follows it: set
+  // metrics.listen and it starts, remove it and it stops, change it and it
+  // moves. An address grove cannot bind is logged and retried next tick,
+  // because a control loop that stops converging over a taken port is worse
+  // than one with no exporter.
+  const syncMetrics = async (): Promise<void> => {
+    const wanted = fleet.loaded.config.metrics?.listen;
+    if (wanted === metricsListen) {
+      return;
+    }
+    if (metricsServer !== undefined) {
+      await metricsServer.close();
+      metricsServer = undefined;
+    }
+    metricsListen = wanted;
+    if (wanted === undefined) {
+      bindFailedFor = undefined;
+      log.info('', 'metrics exporter stopped');
+      return;
+    }
+    try {
+      metricsServer = await startMetricsServer({
+        listen: wanted,
+        collect: collector,
+        onError: (error) =>
+          log.warn('', `metrics scrape failed: ${errorMessage(error)}`),
+      });
+      bindFailedFor = undefined;
+      log.info(
+        '',
+        `metrics exporter listening on ${metricsServer.host}:${metricsServer.port}`,
+      );
+    } catch (error) {
+      // Cleared, so the next tick tries again rather than deciding the
+      // exporter is permanently off.
+      metricsListen = undefined;
+      if (bindFailedFor !== wanted) {
+        bindFailedFor = wanted;
+        log.error(
+          '',
+          `metrics exporter could not bind ${wanted}: ${errorMessage(error)}`,
+        );
+      }
+    }
+  };
+
   const controller = new AbortController();
   const stop = (): void => controller.abort();
   // launchd and systemd both stop a job with a signal, so the handlers are
@@ -192,6 +265,11 @@ export async function runDaemonRun(
     `daemon started, pid ${pid}, config ${fleet.loaded.path}, fast ${Math.round(fleet.loaded.config.tick.fast / 1000)}s, full ${Math.round(fleet.loaded.config.tick.full / 1000)}s`,
   );
   write(`grove daemon running, pid ${pid}`);
+
+  // Last, so the exporter is the only thing between here and the loop: a throw
+  // above it cannot leave a bound port behind, and a scrape landing on its
+  // first second already sees the pid the daemon published.
+  await syncMetrics();
 
   // One line per transition. A daemon that logged every skipped tick would
   // write one line every two minutes for as long as an apply takes.
@@ -239,10 +317,12 @@ export async function runDaemonRun(
             );
           }
           fleet = refreshed.fleet;
+          await syncMetrics();
           await tick({
             fleet,
             kind,
             log,
+            metrics: metricsState,
             ...(options.nativePollIntervalMs === undefined
               ? {}
               : { nativePollIntervalMs: options.nativePollIntervalMs }),
@@ -261,6 +341,9 @@ export async function runDaemonRun(
     // Cleared before the store closes, so a stopped daemon does not read as
     // running until some other process happens to take its pid.
     fleet.store.setMeta(META_DAEMON_PID, '');
+    if (metricsServer !== undefined) {
+      await metricsServer.close().catch(() => undefined);
+    }
     await fleet.close().catch(() => undefined);
     log.info('', 'daemon stopped');
     if (ownsLog) {

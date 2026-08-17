@@ -1,5 +1,10 @@
 import { errorMessage } from '../errors.js';
 import { assertRunnerWorkDir } from '../naming.js';
+import {
+  buildUsageScript,
+  parseUsage,
+  type WorkDirTarget,
+} from '../stack/usage.js';
 import { shellQuote, type Transport } from '../transport/index.js';
 
 const KILOBYTE = 1024;
@@ -7,11 +12,6 @@ const KILOBYTE = 1024;
 // A work dir is `<work_root>/<group>-<index>`, which is the only shape grove
 // ever deletes inside. Anything else is somebody's home directory or a root.
 const WORK_DIR_SHAPE = /^\/(?:[^/]+\/)+[^/]+-[1-9][0-9]*$/;
-
-export interface WorkDirTarget {
-  name: string;
-  workDir: string;
-}
 
 export interface PruneTarget extends WorkDirTarget {
   limitBytes: number;
@@ -43,45 +43,6 @@ export interface PruneSummary {
   // fit". Both produce no results, and only one of them is worth a warning.
   measured: boolean;
   results: PruneResult[];
-}
-
-/** One `du -sk` per seat, in one exec for the whole host. */
-export function buildUsageScript(targets: WorkDirTarget[]): string {
-  const positional = targets
-    .flatMap((target) => [shellQuote(target.name), shellQuote(target.workDir)])
-    .join(' ');
-  return [
-    `set -- ${positional}`,
-    'while [ "$#" -gt 0 ]; do',
-    '  if [ -d "$2" ]; then',
-    // The trailing `/.` names the directory itself. `[ -d ]` follows a symlink
-    // but `du -s` on a symlink operand measures the link and answers 0, and a
-    // mac seat on an external volume is usually a symlinked work dir. A zero
-    // there is indistinguishable from an empty dir, so max_work_size would do
-    // nothing and warn about nothing. `/.` does not follow symlinks inside the
-    // tree, and the name in the output comes from `$1`, so it never reaches
-    // grove.
-    `    printf '%s\\t%s\\n' "$1" "$(du -sk -- "$2/." 2>/dev/null | cut -f1)"`,
-    '  fi',
-    '  shift 2',
-    'done',
-  ].join('\n');
-}
-
-export function parseUsage(text: string): Map<string, number> {
-  const used = new Map<string, number>();
-  for (const line of text.split('\n')) {
-    const [name, kilobytes] = line.split('\t');
-    if (name === undefined || kilobytes === undefined || name === '') {
-      continue;
-    }
-    const value = Number(kilobytes.trim());
-    if (!Number.isFinite(value) || kilobytes.trim() === '') {
-      continue;
-    }
-    used.set(name, value * KILOBYTE);
-  }
-  return used;
 }
 
 /**

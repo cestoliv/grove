@@ -21,6 +21,7 @@ describe('buildProgram', () => {
       'apply',
       'config',
       'daemon',
+      'doctor',
       'logs',
       'plan',
       'status',
@@ -71,6 +72,15 @@ describe('buildProgram', () => {
     expect(flags).toContain('-c, --config <path>');
   });
 
+  it('gives the doctor command its two flags', () => {
+    const doctor = buildProgram().commands.find(
+      (command) => command.name() === 'doctor',
+    );
+    const flags = doctor?.options.map((option) => option.flags) ?? [];
+    expect(flags).toContain('--json');
+    expect(flags).toContain('--strict');
+  });
+
   it('gives the config command a --path flag', () => {
     const config = buildProgram().commands.find(
       (command) => command.name() === 'config',
@@ -87,6 +97,15 @@ describe('buildProgram', () => {
     expect(flags).toContain('-y, --yes');
     expect(flags).toContain('--force');
     expect(flags).toContain('--clean');
+  });
+
+  it('gives the apply command a --skip-doctor flag', () => {
+    const apply = buildProgram().commands.find(
+      (command) => command.name() === 'apply',
+    );
+    expect(apply?.options.map((option) => option.flags)).toContain(
+      '--skip-doctor',
+    );
   });
 
   it('gives the teardown command its four flags', () => {

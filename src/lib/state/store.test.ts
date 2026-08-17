@@ -519,3 +519,85 @@ describe('the daemon state', () => {
     store.close();
   });
 });
+
+describe('counting for the exporter', () => {
+  it('counts restarts per runner', () => {
+    const store = StateStore.open(':memory:');
+    try {
+      const one = store.createRunner({
+        group: 'a',
+        index: 1,
+        host: 'mac',
+        forge: 'gh',
+        name: 'grove-a-1',
+      });
+      const two = store.createRunner({
+        group: 'a',
+        index: 2,
+        host: 'mac',
+        forge: 'gh',
+        name: 'grove-a-2',
+      });
+      store.recordEvent(one.id, 'restarted', 'stuck');
+      store.recordEvent(one.id, 'restarted', 'stuck');
+      store.recordEvent(two.id, 'started');
+
+      expect(store.restartCounts()).toEqual([{ runnerId: one.id, count: 2 }]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('counts jobs per runner and outcome, calling an open job open', () => {
+    const store = StateStore.open(':memory:');
+    try {
+      const runner = store.createRunner({
+        group: 'a',
+        index: 1,
+        host: 'mac',
+        forge: 'gh',
+        name: 'grove-a-1',
+      });
+      store.startJob(runner.id, 1);
+      store.endJob(runner.id, 'unknown', 2);
+      store.startJob(runner.id, 3);
+      store.endJob(runner.id, 'restarted', 4);
+      store.startJob(runner.id, 5);
+
+      const counts = store
+        .jobOutcomeCounts()
+        .sort((left, right) => left.outcome.localeCompare(right.outcome));
+      expect(counts).toEqual([
+        { runnerId: runner.id, outcome: 'open', count: 1 },
+        { runnerId: runner.id, outcome: 'restarted', count: 1 },
+        { runnerId: runner.id, outcome: 'unknown', count: 1 },
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('collapses a NULL outcome and a literal open into one row', () => {
+    const store = StateStore.open(':memory:');
+    try {
+      const runner = store.createRunner({
+        group: 'a',
+        index: 1,
+        host: 'mac',
+        forge: 'gh',
+        name: 'grove-a-1',
+      });
+      // A job grove closed with the word, and a job still running. Both read
+      // as open, and two rows for one label would double-count the seat.
+      store.startJob(runner.id, 1);
+      store.endJob(runner.id, 'open', 2);
+      store.startJob(runner.id, 3);
+
+      expect(store.jobOutcomeCounts()).toEqual([
+        { runnerId: runner.id, outcome: 'open', count: 2 },
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+});

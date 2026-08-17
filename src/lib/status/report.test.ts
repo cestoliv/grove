@@ -467,3 +467,31 @@ describe('the daemon and the suspects', () => {
     expect(built.daemon).toBeUndefined();
   });
 });
+
+describe('buildStatusReport, storage', () => {
+  it('carries what the caller measured', () => {
+    const report = buildStatusReport(loaded(), observed(), [], {
+      storage: [
+        {
+          host: 'mac',
+          docker: {
+            imagesBytes: 4_000_000_000,
+            imagesReclaimableBytes: 1_000_000_000,
+            containersBytes: 0,
+            volumesBytes: 0,
+            buildCacheBytes: 0,
+          },
+          workDirBytes: 2048,
+          workDirs: [{ name: 'grove-overload-arm-1', bytes: 2048 }],
+        },
+      ],
+    });
+
+    expect(report.storage).toHaveLength(1);
+    expect(report.storage[0].host).toBe('mac');
+  });
+
+  it('is an empty list when the caller measured nothing', () => {
+    expect(buildStatusReport(loaded(), observed(), []).storage).toEqual([]);
+  });
+});

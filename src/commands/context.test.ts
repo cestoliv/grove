@@ -310,3 +310,50 @@ describe('openFleet ssh options', () => {
     expect(seen).toEqual([undefined, undefined]);
   });
 });
+
+describe('openFleet, the control node transport', () => {
+  it('exposes the transport a command: credential would run on', async () => {
+    const path = await write();
+    const transports = fakeTransports();
+    const fleet = await openFleet({
+      config: path,
+      connect: (name) => transports[name],
+      store,
+      forges: false,
+    });
+    try {
+      // `mac` is the declared local host, so the control node transport is
+      // the one already opened for it rather than a second one.
+      expect(fleet.localTransport).toBe(transports.mac);
+    } finally {
+      await fleet.close();
+    }
+  });
+
+  it('opens its own control node transport when no host is local', async () => {
+    const path = await write(`
+hosts:
+  atlas: { type: ssh, host: atlas }
+
+forges:
+  gh: { kind: github }
+
+groups:
+  - name: only
+    forge: gh
+    scope: { level: organization, target: Acme }
+    placement: { atlas: 1 }
+`);
+    const fleet = await openFleet({
+      config: path,
+      connect: () => new FakeTransport('atlas'),
+      store,
+      forges: false,
+    });
+    try {
+      expect(fleet.localTransport.name).toBe('local');
+    } finally {
+      await fleet.close();
+    }
+  });
+});

@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ConfigError } from './errors.js';
 import { loadConfig } from './load.js';
-import { DEFAULT_HISTORY_RETENTION_MS } from './schema.js';
+import {
+  DEFAULT_HISTORY_RETENTION_MS,
+  DEFAULT_METRICS_SCRAPE_CACHE_MS,
+} from './schema.js';
 
 // Built at runtime so secret scanners do not match the fixture.
 const FAKE_GHP = ['ghp', '0123456789abcdefghij'].join('_');
@@ -233,5 +236,48 @@ describe('history retention', () => {
     expect(loaded.config.history?.retentionMs).toBe(
       DEFAULT_HISTORY_RETENTION_MS,
     );
+  });
+});
+
+describe('metrics', () => {
+  it('reads the listen address and the scrape cache', async () => {
+    const path = await write(
+      `${VALID}\nmetrics: { listen: "127.0.0.1:9130", scrape_cache: 30s }\n`,
+    );
+    const loaded = await loadConfig({
+      path,
+      env: { GH_TOKEN: 'from-env' },
+    });
+    expect(loaded.config.metrics).toEqual({
+      listen: '127.0.0.1:9130',
+      scrapeCacheMs: 30_000,
+    });
+  });
+
+  it('defaults the scrape cache when the config names only an address', async () => {
+    const path = await write(
+      `${VALID}\nmetrics: { listen: "127.0.0.1:9130" }\n`,
+    );
+    const loaded = await loadConfig({
+      path,
+      env: { GH_TOKEN: 'from-env' },
+    });
+    expect(loaded.config.metrics?.scrapeCacheMs).toBe(
+      DEFAULT_METRICS_SCRAPE_CACHE_MS,
+    );
+  });
+
+  it('leaves metrics absent when the config names none, so the exporter stays off', async () => {
+    const path = await write(VALID);
+    const loaded = await loadConfig({
+      path,
+      env: { GH_TOKEN: 'from-env' },
+    });
+    expect(loaded.config.metrics).toBeUndefined();
+  });
+
+  it('refuses an address with no host', async () => {
+    const path = await write(`${VALID}\nmetrics: { listen: ":9130" }\n`);
+    await expect(loadConfig({ path, env: {} })).rejects.toThrow(ConfigError);
   });
 });

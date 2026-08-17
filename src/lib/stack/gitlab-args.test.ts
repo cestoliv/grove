@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import type { GroupConfig, HostConfig } from '../config/index.js';
+import type { GroupConfig, GroveConfig, HostConfig } from '../config/index.js';
 import {
   buildGitlabEntrypointCommand,
   buildGitlabRunArgs,
   buildGitlabRunnerSpec,
   DEFAULT_GITLAB_JOB_IMAGE,
   DEFAULT_GITLAB_RUNNER_IMAGE,
+  GITLAB_RUNNER_METRICS_PORT,
   gitlabSystemIdPath,
+  groupMetricsPort,
+  RAW_GITLAB_KEYS,
   rawGitlabOptions,
 } from './gitlab-args.js';
 
@@ -172,7 +175,7 @@ describe('buildGitlabEntrypointCommand', () => {
     });
     const lines = buildGitlabEntrypointCommand(spec).split('\n');
     expect(lines[2]).toBe(
-      "  printf 'concurrent = %s\\n' '4' > '/etc/gitlab-runner/config.toml'",
+      "  printf '%s\\n' 'concurrent = 4' > '/etc/gitlab-runner/config.toml'",
     );
     expect(lines[3]).toContain('gitlab-runner register');
   });
@@ -318,5 +321,142 @@ describe('gitlabSystemIdPath', () => {
     expect(gitlabSystemIdPath('/PROD/local/grove/chevro-dind-1-config')).toBe(
       '/PROD/local/grove/chevro-dind-1-config/.runner_system_id',
     );
+  });
+});
+
+function specWith(raw?: Record<string, unknown>) {
+  return buildGitlabRunnerSpec({
+    group: group(raw === undefined ? {} : ({ raw } as Partial<GroupConfig>)),
+    host,
+    index: 1,
+    registration,
+  });
+}
+
+describe('raw.metrics_port', () => {
+  it('is read out of the raw block', () => {
+    expect(rawGitlabOptions({ metrics_port: 9252 }).metricsPort).toBe(9252);
+    expect(rawGitlabOptions({}).metricsPort).toBeUndefined();
+  });
+
+  it('is listed as a key this stack reads', () => {
+    expect(RAW_GITLAB_KEYS).toContain('metrics_port');
+    expect(rawGitlabOptions({ metrics_port: 9252 }).unknownKeys).toEqual([]);
+  });
+
+  it('refuses a value that is not a port', () => {
+    expect(() => rawGitlabOptions({ metrics_port: 'nine' })).toThrow(
+      /raw\.metrics_port/,
+    );
+    expect(() => rawGitlabOptions({ metrics_port: 0 })).toThrow(
+      /raw\.metrics_port/,
+    );
+    expect(() => rawGitlabOptions({ metrics_port: 70_000 })).toThrow(
+      /raw\.metrics_port/,
+    );
+  });
+
+  it('refuses a base a group of that size cannot count up from', () => {
+    // Seat n takes the base plus n - 1, so a base inside the range still asks
+    // for a port outside it once the group is big enough.
+    expect(() => rawGitlabOptions({ metrics_port: 65_530 }, 10)).toThrow(
+      /raw\.metrics_port/,
+    );
+    expect(rawGitlabOptions({ metrics_port: 65_530 }, 6).metricsPort).toBe(
+      65_530,
+    );
+  });
+
+  it('carries the port onto the spec', () => {
+    expect(specWith({ metrics_port: 9252 }).metricsPort).toBe(9252);
+    expect(specWith().metricsPort).toBeUndefined();
+  });
+
+  it('offsets the port by the seat index, so one group never collides', () => {
+    const spec = buildGitlabRunnerSpec({
+      group: group({ raw: { metrics_port: 9252 } } as Partial<GroupConfig>),
+      host,
+      index: 3,
+      registration,
+    });
+    expect(spec.metricsPort).toBe(9254);
+    const args = buildGitlabRunArgs(spec);
+    expect(args[args.indexOf('--publish') + 1]).toBe(
+      `127.0.0.1:9254:${GITLAB_RUNNER_METRICS_PORT}`,
+    );
+  });
+
+  it('writes listen_address into config.toml before register runs', () => {
+    const command = buildGitlabEntrypointCommand(
+      specWith({ metrics_port: 9252 }),
+    );
+    expect(command).toContain('listen_address = ":9252"');
+    expect(command.indexOf('listen_address')).toBeLessThan(
+      command.indexOf('gitlab-runner register'),
+    );
+  });
+
+  it('writes concurrent and listen_address in one write', () => {
+    const spec = {
+      ...specWith({ metrics_port: 9252 }),
+      concurrent: 4,
+    };
+    const command = buildGitlabEntrypointCommand(spec);
+    expect(command).toContain('concurrent = 4');
+    expect(command).toContain('listen_address = ":9252"');
+    // One redirection, so the second line cannot truncate the first.
+    expect(command.split('> ').length - 1).toBe(1);
+  });
+
+  it('writes nothing extra when neither is set', () => {
+    const command = buildGitlabEntrypointCommand(specWith());
+    expect(command).not.toContain('listen_address');
+    expect(command).not.toContain('concurrent =');
+  });
+
+  it('publishes the port on the host loopback only', () => {
+    const args = buildGitlabRunArgs(specWith({ metrics_port: 9253 }));
+    const publish = args[args.indexOf('--publish') + 1];
+    expect(publish).toBe(`127.0.0.1:9253:${GITLAB_RUNNER_METRICS_PORT}`);
+  });
+
+  it('publishes nothing when the group declares no port', () => {
+    expect(buildGitlabRunArgs(specWith())).not.toContain('--publish');
+  });
+});
+
+describe('groupMetricsPort', () => {
+  function configFor(kind: string, overrides: Partial<GroupConfig> = {}) {
+    return {
+      forges: { 'gl-chevro': { kind } },
+      groups: [group(overrides)],
+    } as unknown as GroveConfig;
+  }
+
+  it('gives the declared port for a GitLab Docker group', () => {
+    const overrides = { raw: { metrics_port: 9252 } } as Partial<GroupConfig>;
+    const config = configFor('gitlab', overrides);
+    expect(groupMetricsPort(config, group(overrides))).toBe(9252);
+  });
+
+  it('gives nothing when the group declares none', () => {
+    expect(groupMetricsPort(configFor('gitlab'), group())).toBeUndefined();
+  });
+
+  it('gives nothing when no gitlab-runner container backs the seat', () => {
+    // A GitHub Actions runner exposes no metrics endpoint, and a native seat
+    // has no container to publish a port from.
+    const overrides = { raw: { metrics_port: 9252 } } as Partial<GroupConfig>;
+    expect(
+      groupMetricsPort(configFor('github', overrides), group(overrides)),
+    ).toBeUndefined();
+
+    const native = {
+      ...overrides,
+      stack: 'native',
+    } as Partial<GroupConfig>;
+    expect(
+      groupMetricsPort(configFor('gitlab', native), group(native)),
+    ).toBeUndefined();
   });
 });

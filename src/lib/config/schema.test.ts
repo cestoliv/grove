@@ -3,11 +3,13 @@ import { issuesFromZod } from './errors.js';
 import {
   configSchema,
   DEFAULT_HISTORY_RETENTION_MS,
+  DEFAULT_METRICS_SCRAPE_CACHE_MS,
   DEFAULT_TICK,
   forgeSchema,
   groupSchema,
   historySchema,
   hostSchema,
+  metricsSchema,
   placementSchema,
   scopeSchema,
   tickSchema,
@@ -390,5 +392,45 @@ describe('history', () => {
 
   it('defaults to ninety days', () => {
     expect(DEFAULT_HISTORY_RETENTION_MS).toBe(90 * 24 * 60 * 60 * 1000);
+  });
+});
+
+describe('metricsSchema', () => {
+  it('takes a listen address and defaults the scrape cache to absent', () => {
+    expect(metricsSchema.parse({ listen: '127.0.0.1:9130' })).toEqual({
+      listen: '127.0.0.1:9130',
+    });
+  });
+
+  it('parses the scrape cache as a duration', () => {
+    expect(
+      metricsSchema.parse({ listen: '127.0.0.1:9130', scrape_cache: '30s' })
+        .scrape_cache,
+    ).toBe(30_000);
+  });
+
+  it('refuses an address grove cannot bind and an unknown key', () => {
+    expect(metricsSchema.safeParse({ listen: '9130' }).success).toBe(false);
+    expect(
+      metricsSchema.safeParse({ listen: '127.0.0.1:9130', port: 1 }).success,
+    ).toBe(false);
+  });
+
+  it('is optional on the config, and unknown blocks stay rejected', () => {
+    expect(DEFAULT_METRICS_SCRAPE_CACHE_MS).toBe(10_000);
+    const result = configSchema.safeParse({
+      hosts: {},
+      forges: {},
+      groups: [
+        {
+          name: 'overload-arm',
+          forge: 'gh-overload',
+          scope: { level: 'organization', target: 'Overload-coach' },
+          placement: { host: 'mac', count: 2 },
+        },
+      ],
+      metrics: { listen: '127.0.0.1:9130', unknown: 1 },
+    });
+    expect(result.success).toBe(false);
   });
 });

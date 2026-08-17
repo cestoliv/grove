@@ -44,6 +44,10 @@ export function buildProgram(): Command {
     .option('-y, --yes', 'Answer yes to the confirmation')
     .option('--force', 'Skip the drain wait and the confirmation')
     .option('--clean', 'Wipe work directories on this pass')
+    .option(
+      '--skip-doctor',
+      'Skip the host checks grove runs before a first apply',
+    )
     .action(
       async (
         options: {
@@ -51,6 +55,7 @@ export function buildProgram(): Command {
           yes?: boolean;
           force?: boolean;
           clean?: boolean;
+          skipDoctor?: boolean;
         },
         command: Command,
       ) => {
@@ -101,6 +106,26 @@ export function buildProgram(): Command {
         ...options,
       });
     });
+
+  program
+    .command('doctor')
+    .description(
+      'Check every host, forge and group, and print the fix for each failure.',
+    )
+    .option('--json', 'Print the report as JSON')
+    .option('--strict', 'Exit 1 on a warning as well as on a failure')
+    .action(
+      async (
+        options: { json?: boolean; strict?: boolean },
+        command: Command,
+      ) => {
+        const { runDoctor } = await import('./commands/doctor.js');
+        process.exitCode = await runDoctor({
+          config: command.optsWithGlobals().config,
+          ...options,
+        });
+      },
+    );
 
   program
     .command('logs')

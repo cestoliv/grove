@@ -12,6 +12,12 @@ import {
   loadConfig,
 } from '../config/index.js';
 import { errorMessage } from '../errors.js';
+import {
+  META_LAST_FAST_TICK_MS,
+  META_LAST_FULL_TICK_MS,
+  type MetricsState,
+  snapshotFromStatus,
+} from '../metrics/index.js';
 import { parseManagedName } from '../naming.js';
 import {
   type Action,
@@ -24,8 +30,14 @@ import {
   persistSystemIds,
   reconcile,
 } from '../reconcile/index.js';
-import { buildRunnerDirs, rawStackWarnings } from '../stack/index.js';
 import {
+  buildRunnerDirs,
+  rawStackWarnings,
+  readHostStorage,
+  seatWorkDirTargets,
+} from '../stack/index.js';
+import {
+  type LivenessState,
   META_LAST_FAST_TICK,
   META_LAST_FULL_TICK,
   type StateStore,
@@ -35,7 +47,9 @@ import {
   hostLivenessFor,
   livenessFor,
   type StatusReport,
+  type StatusRow,
 } from '../status/report.js';
+import type { Transport } from '../transport/index.js';
 import type { DaemonLog } from './log.js';
 import { type PruneTarget, pruneWorkDirs } from './prune.js';
 import { type SuperviseResult, superviseFleet } from './supervise.js';
@@ -63,6 +77,9 @@ export interface TickOptions {
   log: DaemonLog;
   now?: () => number;
   nativePollIntervalMs?: number;
+  // Present only when the config sets metrics.listen. The tick publishes what
+  // it observed into it, so a scrape costs no SSH.
+  metrics?: MetricsState;
 }
 
 // Frozen, because a fast tick hands this straight to the code that reads a
@@ -414,6 +431,18 @@ export async function runTick(options: TickOptions): Promise<TickSummary> {
     observed,
     fleet.store.activeRunners(),
   );
+  // One reading of a row, shared by the liveness sample and the exporter
+  // snapshot, so the two can never disagree about what a seat was doing. A
+  // full tick whose forge did not answer knows exactly what a fast tick knows,
+  // so it reads the row the same way rather than calling a running seat
+  // offline over a forge outage.
+  const readingOf = (row: StatusRow): LivenessState => {
+    const forge = forgesByName.get(row.forge);
+    return full && forge?.reachable === true
+      ? livenessFor(row)
+      : hostLivenessFor(row);
+  };
+
   for (const row of report.rows) {
     if (row.recordId === undefined) {
       continue;
@@ -424,15 +453,41 @@ export async function runTick(options: TickOptions): Promise<TickSummary> {
     if (host === undefined || !host.reachable) {
       continue;
     }
-    const forge = forgesByName.get(row.forge);
-    // A full tick whose forge did not answer knows exactly what a fast tick
-    // knows, so it reads the row the same way rather than calling a running
-    // seat offline over a forge outage.
-    const answered = forge?.reachable === true;
-    fleet.store.recordLiveness(
-      row.recordId,
-      full && answered ? livenessFor(row) : hostLivenessFor(row),
+    fleet.store.recordLiveness(row.recordId, readingOf(row));
+  }
+
+  if (options.metrics !== undefined) {
+    options.metrics.setSnapshot(
+      snapshotFromStatus(report, config, {
+        at: started,
+        liveness: readingOf,
+      }),
     );
+    if (full) {
+      // One `docker system df` and one work-dir script per reachable host,
+      // every thirty minutes. A fast tick keeps the last measurement.
+      const storage = await Promise.all(
+        observed.hosts
+          .filter((host) => host.reachable)
+          .map((host) =>
+            readHostStorage(
+              // A reachable host always has a transport: openFleet opens one
+              // per declared host and observeFleet only reports declared ones.
+              fleet.transports.get(host.host) as Transport,
+              host.host,
+              seatWorkDirTargets(config, host.host, host.home),
+              {
+                docker: config.groups.some(
+                  (group) =>
+                    group.stack === 'docker' &&
+                    group.placement[host.host] !== undefined,
+                ),
+              },
+            ),
+          ),
+      );
+      options.metrics.setStorage(storage);
+    }
   }
 
   let prunedEntries = 0;
@@ -451,10 +506,13 @@ export async function runTick(options: TickOptions): Promise<TickSummary> {
     }
   }
 
+  const durationMs = (options.now?.() ?? Date.now()) - started;
   // A full tick replaces the fast tick it coincides with, so it stamps both.
   fleet.store.setMeta(META_LAST_FAST_TICK, String(started));
+  fleet.store.setMeta(META_LAST_FAST_TICK_MS, String(durationMs));
   if (full) {
     fleet.store.setMeta(META_LAST_FULL_TICK, String(started));
+    fleet.store.setMeta(META_LAST_FULL_TICK_MS, String(durationMs));
   }
 
   const appliedCreates = new Set(
@@ -463,7 +521,6 @@ export async function runTick(options: TickOptions): Promise<TickSummary> {
       .map((action) => action.name),
   );
 
-  const durationMs = (options.now?.() ?? Date.now()) - started;
   const summary: TickSummary = {
     kind,
     applied: result.applied.length,

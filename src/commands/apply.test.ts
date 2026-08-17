@@ -88,6 +88,10 @@ function options(
     createForgeClient: () => client,
     color: false,
     isTty: false,
+    // The gate has its own tests below. Every other test in this file is
+    // about the reconciler, and its fake transport answers nothing the host
+    // checks ask about.
+    skipDoctor: true,
     stdout: () => undefined,
     stderr: () => undefined,
     ...extra,
@@ -494,5 +498,111 @@ describe('runApply and the state lock', () => {
     await write();
     await runApply(options(mac(), { isPidAlive: () => false }));
     expect(existsSync(join(dir, 'state', 'grove.pid'))).toBe(false);
+  });
+});
+
+// A transport that answers every host check, in the order FakeTransport
+// matches prefixes: the shell probe before the HOME read, because both start
+// with `sh -c printf`. A broken variant seeds it with the failing stub, since
+// FakeTransport answers with the first match rather than the last.
+function macDoctorReady(seed = new FakeTransport('mac')): FakeTransport {
+  return seed
+    .on('uname', { stdout: 'Darwin arm64\n' })
+    .on('sh -c printf %s ok', { stdout: 'ok' })
+    .on('sh -c printf', { stdout: '/Users/olivier' })
+    .on('id -u', { stdout: '501\n' })
+    .on('date +%s', { stdout: String(Math.floor(Date.now() / 1000)) })
+    .on('docker ps', { stdout: '' })
+    .on('docker run', { stdout: 'c0ffee\n' })
+    .on('docker system df', { stdout: 'Images\t2GB\t0B (0%)\n' })
+    .on('docker version', { stdout: '27.1.1\n' })
+    .on('df -Pk', {
+      stdout: [
+        'Filesystem 1024-blocks Used Available Capacity Mounted on',
+        '/dev/disk3s5 100000000 1000 90000000 10% /',
+      ].join('\n'),
+    })
+    .on('launchctl print', { stdout: 'com.apple.launchd.peruser\n' });
+}
+
+function macDockerDown(): FakeTransport {
+  return macDoctorReady(
+    new FakeTransport('mac').fail(
+      'docker version',
+      'Cannot connect to the Docker daemon at unix:///var/run/docker.sock.',
+      1,
+    ),
+  );
+}
+
+describe('runApply, the first-apply doctor gate', () => {
+  it('refuses an apply against a host whose checks failed, and names the fix', async () => {
+    await write();
+    const transport = macDockerDown();
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runApply(
+      options(transport, {
+        skipDoctor: false,
+        yes: true,
+        stdout: (text: string) => out.push(text),
+        stderr: (text: string) => err.push(text),
+      }),
+    );
+
+    expect(code).toBe(EXIT_UNREACHABLE);
+    expect(out.join('\n')).toContain('host.docker-daemon');
+    expect(err.join('\n')).toContain('grove doctor');
+    // Nothing was created, because the gate ran before the plan.
+    expect(store.activeRunners()).toHaveLength(0);
+  });
+
+  it('applies anyway with --skip-doctor', async () => {
+    await write();
+    const transport = macDockerDown();
+    const code = await runApply(
+      options(transport, { skipDoctor: true, yes: true }),
+    );
+
+    expect(code).toBe(EXIT_OK);
+    expect(store.activeRunners()).toHaveLength(1);
+  });
+
+  it('prints the findings on a dry run without refusing', async () => {
+    await write();
+    const transport = macDockerDown();
+    const out: string[] = [];
+    const code = await runApply(
+      options(transport, {
+        skipDoctor: false,
+        dryRun: true,
+        stdout: (text: string) => out.push(text),
+      }),
+    );
+
+    expect(code).toBe(EXIT_OK);
+    expect(out.join('\n')).toContain('host.docker-daemon');
+  });
+
+  it('checks a host once, and asks it nothing on the next apply', async () => {
+    await write();
+    const first = macDoctorReady();
+    expect(
+      await runApply(options(first, { skipDoctor: false, yes: true })),
+    ).toBe(EXIT_OK);
+    // `df -Pk` is run by the doctor gate and by nothing else in an apply.
+    expect(
+      first.commandLines().filter((line) => line.startsWith('df -Pk')).length,
+    ).toBeGreaterThan(0);
+
+    const second = macDoctorReady().on('docker ps', {
+      stdout: psLine('grove-overload-arm-1'),
+    });
+    expect(
+      await runApply(options(second, { skipDoctor: false, yes: true })),
+    ).toBe(EXIT_OK);
+    expect(
+      second.commandLines().filter((line) => line.startsWith('df -Pk')),
+    ).toHaveLength(0);
   });
 });

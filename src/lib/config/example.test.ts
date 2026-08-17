@@ -57,12 +57,26 @@ describe('grove.example.yaml', () => {
     });
   });
 
-  it('shows the gitlab job image the README documents', async () => {
+  it('shows the gitlab job image and metrics port the README documents', async () => {
     const loaded = await loadConfig({
       path: EXAMPLE_PATH,
       env: { GH_TOKEN: 'example-token' },
     });
-    expect(loaded.config.groups[1].raw).toEqual({ job_image: 'docker:27' });
+    expect(loaded.config.groups[1].raw).toEqual({
+      job_image: 'docker:27',
+      metrics_port: 9252,
+    });
+  });
+
+  it('turns the exporter on, so the docs show a real metrics block', async () => {
+    const loaded = await loadConfig({
+      path: EXAMPLE_PATH,
+      env: { GH_TOKEN: 'example-token' },
+    });
+    expect(loaded.config.metrics).toEqual({
+      listen: '127.0.0.1:9130',
+      scrapeCacheMs: 10_000,
+    });
   });
 
   it('uses environment interpolation rather than a literal token', async () => {

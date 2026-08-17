@@ -9,6 +9,7 @@ import { validateReferences } from './references.js';
 import {
   configSchema,
   DEFAULT_HISTORY_RETENTION_MS,
+  DEFAULT_METRICS_SCRAPE_CACHE_MS,
   DEFAULT_TICK,
   type GroveConfig,
 } from './schema.js';
@@ -114,6 +115,17 @@ export async function loadConfig(
       retentionMs:
         parsed.data.history?.retention ?? DEFAULT_HISTORY_RETENTION_MS,
     },
+    // Absent means the exporter stays off, so this only names a value when
+    // the config named a listen address.
+    metrics:
+      parsed.data.metrics === undefined
+        ? undefined
+        : {
+            listen: parsed.data.metrics.listen,
+            scrapeCacheMs:
+              parsed.data.metrics.scrape_cache ??
+              DEFAULT_METRICS_SCRAPE_CACHE_MS,
+          },
   };
 
   const references = validateReferences(config);

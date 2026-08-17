@@ -38,7 +38,7 @@ describe('rawStackWarnings', () => {
     expect(warnings[0].message).toContain('docker_run_args and env');
   });
 
-  it('names the four keys the GitLab stack reads', () => {
+  it('names the five keys the GitLab stack reads', () => {
     const warnings = rawStackWarnings(
       config([
         {
@@ -49,7 +49,7 @@ describe('rawStackWarnings', () => {
       ]),
     );
     expect(warnings[0].message).toContain(
-      'docker_run_args, env, job_image and register_args',
+      'docker_run_args, env, job_image, metrics_port and register_args',
     );
   });
 

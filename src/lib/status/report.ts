@@ -6,6 +6,7 @@ import {
   type OwnershipClass,
   sharedEntities,
 } from '../reconcile/index.js';
+import type { HostStorage } from '../stack/index.js';
 import type { LivenessState, RunnerRecord } from '../state/index.js';
 
 export interface StatusRow {
@@ -64,6 +65,9 @@ export interface DaemonStatus {
 export interface StatusReportOptions {
   suspects?: SuspectRow[];
   daemon?: DaemonStatus;
+  // Measured by the caller, because it costs two commands per host and only
+  // `status` is willing to spend them.
+  storage?: HostStorage[];
 }
 
 export interface StatusReport {
@@ -72,6 +76,7 @@ export interface StatusReport {
   sharedRunners: SharedRunnerRow[];
   suspects: SuspectRow[];
   daemon?: DaemonStatus;
+  storage: HostStorage[];
   unreachableHosts: string[];
   unreachableForges: string[];
   ok: boolean;
@@ -179,6 +184,7 @@ export function buildStatusReport(
     sharedRunners,
     suspects: options.suspects ?? [],
     ...(options.daemon === undefined ? {} : { daemon: options.daemon }),
+    storage: options.storage ?? [],
     unreachableHosts,
     unreachableForges,
     ok: unreachableHosts.length === 0 && unreachableForges.length === 0,

@@ -6,7 +6,7 @@ grove is agentless. One control node holds the config and reaches every host ove
 
 ## Status
 
-Milestone 5 of six. grove manages GitHub and GitLab runners in Docker containers, and GitHub runners as processes on the host under launchd on macOS and systemd on Linux. `config`, `plan`, `apply`, `status`, `logs` and `teardown` work on every one of them. `grove daemon` now converges the fleet on its own, detects stuck runners, prunes work directories against `max_work_size` and prunes its own history against `history.retention`. `doctor` and Prometheus metrics arrive in milestone 6.
+Milestone 6 of six, and the last one. grove manages GitHub and GitLab runners in Docker containers, and GitHub runners as processes on the host under launchd on macOS and systemd on Linux. `config`, `plan`, `apply`, `status`, `logs`, `doctor` and `teardown` work on every one of them. `grove daemon` converges the fleet on its own, detects stuck runners, prunes work directories against `max_work_size` and prunes its own history against `history.retention`. `grove doctor` checks every host, forge and group and prints the fix for each finding, and `metrics.listen` turns on a Prometheus exporter inside the daemon.
 
 Switching a group from `docker` to `native`, or back, takes two applies. The first drains the seat on the stack it runs on today, deregisters it and retires its record. The second creates it on the new stack. grove refuses to run one runner name on two supervisors at once, so it waits for the record to go before it makes the new seat.
 
@@ -284,6 +284,15 @@ Shared runners
   gl-chevro  chevro-dind  48      docker,dind  2/3
 ```
 
+`grove status` also prints a `Storage` block saying what grove costs each host. `IMAGES` and `RECLAIMABLE` come from `docker system df`, so `RECLAIMABLE` is what `docker image prune` would give back. `WORK DIRS` is the total of one `du -sk` per managed seat, and `NOTE` names the largest of them. That is two commands per host per run, which is why only `grove status` and the full tick spend them. `--json` carries the same numbers under `storage`.
+
+```
+Storage
+  HOST   IMAGES    RECLAIMABLE  WORK DIRS  NOTE
+  mac    24.0 GiB  9.0 GiB      61.0 GiB   largest grove-overload-arm-1 at 38.0 GiB
+  atlas  12.0 GiB  2.0 GiB      4.0 GiB    largest grove-chevro-dind-2 at 3.0 GiB
+```
+
 When a daemon has run on this control node, `grove status` closes with a `Daemon` block saying whether the loop is running, under which pid, and when each tick last ran. A `grove apply` that holds the lock is not the daemon and is never reported as one. A fleet with suspect runners gains a `Suspect runners` table naming each one, the host it sits on, when it became a suspect and why. [Stuck detection](#stuck-detection) says what makes one.
 
 ```
@@ -298,6 +307,160 @@ Suspect runners
 ```
 
 `grove logs` takes a group name or a runner name, and reads whichever stack that runner uses. A Docker seat goes to `docker logs`. A native seat on macOS goes to `tail` on the two files launchd redirects into, `<install_dir>/stdout.log` and `<install_dir>/stderr.log`. A native seat on Linux goes to `journalctl --user -u grove-<group>-<index>.service`, and grove points at the runner's own `_diag` directory when `journalctl` is not installed. A group with several runners prints each in turn with a header. `--follow` needs exactly one runner. `--tail` defaults to 200 lines.
+
+## Doctor
+
+```bash
+grove doctor
+grove doctor --strict
+grove doctor --json
+```
+
+grove never provisions a host, and that is the trade. `grove doctor` is what grove owes you in return: a precise diagnosis, with the fix printed for every failure.
+
+| Target | What it checks |
+|---|---|
+| Every host | `host.reachable` that the transport answers at all, `host.shell` that `sh` prints only what it was asked to print, `host.platform` that the host is macOS or Linux and what architecture it is, `host.clock` the skew against the control node, `host.docker-cli` and `host.docker-daemon` that a Docker group has a daemon to run on, `host.image-store` how big the image store has grown, `host.work-dirs` what the seats spend under the work root, `host.curl` that a seat publishing a metrics port can be scraped |
+| Every work root | `host.disk` free space and capacity, `host.work-root-exists` that the directory is there, `host.work-root-writable` that this user may write in it, `host.work-root-volume` that a root under `/Volumes`, `/mnt` or `/media` is a mounted disk and not the boot disk wearing its name |
+| Every Linux host | `host.docker-group` that the daemon answers without `sudo`, `host.systemd-user` that the user manager answers, `host.lingering` that the user session survives a logout |
+| Every macOS host | `host.launchd` that the `gui/<uid>` domain answers, `host.xcode-select` where Xcode is selected, `host.xcodebuild` that it runs and its licence is accepted, `host.simulators` that a runtime is installed |
+| Every forge | `forge.credential` that grove resolves a token, `forge.token` that the forge accepts it, `forge.scopes` that it carries the scopes the declared levels need, `forge.admin` that an `instance` level scope has an administrator behind it, `forge.scope-access` that each declared scope is readable |
+| Every group | `group.privileged-socket`, `group.arch`, `group.native-forge`, `group.native-platform`, `group.max-work-size`, `group.raw`, `group.native-option` and `group.metrics-port`. Each is a config warning `plan` already prints, and doctor is the one that also prints what to do about it |
+| The control node | `control.node` the Node version, `control.state-dir` that the state directory is writable, `control.database-mode` that `grove.db` is not group or world readable, `control.ssh` that an `ssh` binary is there when a host needs one, `control.cli-delegation` that `gh` or `glab` is there when a forge has no `auth` block, `control.daemon` that the loop is installed and running, `control.metrics-listen` that the exporter address is valid and loopback |
+
+Every check answers with one of four statuses.
+
+| Status | What it means |
+|---|---|
+| `ok` | grove looked, and this is fine |
+| `warn` | grove looked, this is worth reading, and nothing is blocked |
+| `fail` | grove looked, and something grove needs is not there |
+| `skip` | grove did not look, because nothing in this config depends on it, or because the host did not answer |
+
+`grove doctor` exits 0 when nothing failed and 1 when something did. `--strict` makes a warning exit 1 too, which is what you want in CI. `--json` prints the whole report, sorted the same way the table is.
+
+```
+config  /work/grove.yaml
+
+Host atlas
+  CHECK                    SUBJECT            STATUS  SUMMARY
+  host.reachable                              ok      answered as Linux amd64
+  host.shell                                  ok      sh runs a command and prints only its output
+  host.platform                               ok      Linux amd64
+  host.clock                                  ok      clock agrees with this machine
+  host.disk                /PROD/local/grove  warn    8.4 GiB free, 93% used
+  host.docker-cli                             ok      the docker binary is on the PATH
+  host.docker-daemon                          fail    Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+  host.docker-group                           ok      the user is in the docker group
+  host.image-store                            warn    the image store could not be measured: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+  host.work-root-exists    /PROD/local/grove  ok      the work root is a directory
+  host.work-root-writable  /PROD/local/grove  ok      the work root is writable
+  host.work-root-volume    /PROD/local/grove  skip    the work root is not under /Volumes, /mnt or /media, so an absent mount cannot be mistaken for it
+  host.work-dirs                              ok      0 B across 2 seats
+  host.systemd-user                           ok      the systemd user manager is running
+  host.lingering                              ok      lingering is enabled for the SSH user
+  host.launchd                                skip    Linux runs systemd, not launchd
+  host.xcode-select                           skip    Xcode is a macOS matter
+  host.xcodebuild                             skip    Xcode is a macOS matter
+  host.simulators                             skip    simulators are a macOS matter
+  host.curl                                   skip    no seat on this host publishes a gitlab-runner metrics port
+
+Fixes
+  warn  host.disk  Host atlas, /PROD/local/grove
+      8.4 GiB free, 93% used
+      Free space on /PROD, or set max_work_size on the groups using this root so grove prunes them oldest-first on the full tick.
+
+  fail  host.docker-daemon  Host atlas
+      Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+      Start the daemon with `sudo systemctl start docker`, and `sudo systemctl enable docker` so a reboot does not take the fleet with it.
+
+  warn  host.image-store  Host atlas
+      the image store could not be measured: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+      Check that `docker system df` answers on the host. grove reports the image store rather than managing it, so this blocks nothing.
+
+11 ok, 2 warnings, 1 failure, 6 skipped
+Run the fixes above, then grove doctor again. grove apply runs the host checks before the first apply against a host it has no record of, and refuses a host with a failing check.
+```
+
+That is one host of a fleet. A real run prints the control node, then every host, then every forge, then every group, and one `Fixes` entry per warning and per failure.
+
+The thresholds are these, so none of them is a surprise. A work root with less than 1 GiB free fails, because a job cannot pull one Docker layer into it, and one with less than 10 GiB free or at 90% or more of capacity warns. A host clock 5 minutes or more out of step with the control node fails, because a forge rejects a token signed that far away, and 30 seconds or more out warns. An image store of 20 GiB or more warns, and so does one where more than half of it is reclaimable.
+
+Doctor never writes to a host. Writability is `test -w`, not a file grove creates. The GitHub scope proof is a runner read, not a minted registration token. Nothing in doctor creates a directory, a token or a container, and nothing in it removes one.
+
+An unreachable host is one failure and nineteen skips, and every other host is still checked. A broken forge credential is a finding on that forge, and every other forge is still checked. One host that cannot answer never costs you the diagnosis of the rest of the fleet.
+
+Host checks also run on their own, before the first `grove apply` against a host grove has no record of. A failure refuses the apply and prints the table above the refusal. `--skip-doctor` bypasses the whole gate. grove remembers a host that passed, in `meta` next to the tick stamps, so the second apply asks it nothing. Only the host family is gated: a broken token fails the apply anyway with an error that names it, and blocking an apply on a group warning would make `privileged: true` unusable. `grove teardown` is never gated, because removing runners from a host whose Docker is broken is a thing you may well be doing on purpose.
+
+## Metrics
+
+The exporter is off unless `metrics.listen` is set. Set it and `grove daemon run` serves `/metrics` and `/healthz` on that address, and nothing else.
+
+```yaml
+metrics: { listen: "127.0.0.1:9130", scrape_cache: 10s }
+```
+
+The daemon reloads the config before every tick, so the exporter follows it: set `metrics.listen` and it starts on the next tick, remove it and it stops, change it and it moves. An address grove cannot bind is logged and retried on the tick after, because a control loop that stops converging over a taken port is worse than one with no exporter.
+
+`listen` is a real `host:port`. A bare `:9130` means every interface in Go's convention, and this endpoint should never bind every interface by accident, so grove wants the host spelled out and rejects port 0. The exporter binds exactly what you write and nothing else.
+
+Bind loopback. The endpoint has no authentication. It exposes group names, host names, seat states and job counts, and no credential. Put an SSH tunnel or a reverse proxy in front of it if Prometheus runs on another machine. `grove doctor` warns when the address is not loopback.
+
+| Metric | Type | What it says |
+|---|---|---|
+| `grove_up` | gauge | Always 1 while the exporter answers |
+| `grove_build_info` | gauge | Always 1, labelled with the grove `version` this exporter runs |
+| `grove_host_reachable` | gauge | Whether the `host` answered on the last tick |
+| `grove_forge_reachable` | gauge | Whether the `forge` answered on the last full tick |
+| `grove_runners` | gauge | Managed seats by `group`, `host`, `forge` and `state` |
+| `grove_runners_expected` | gauge | Seats the config asks for, by `group` and `host` |
+| `grove_suspect_runners` | gauge | How many seats one stuck signal agrees about |
+| `grove_daemon_running` | gauge | Whether the control loop is running on this node |
+| `grove_last_tick_timestamp_seconds` | gauge | When each tick last ran, by `kind`, which is `fast` or `full` |
+| `grove_tick_duration_seconds` | gauge | How long the last tick of each `kind` took |
+| `grove_snapshot_age_seconds` | gauge | How long ago the tick that produced the fleet gauges ran |
+| `grove_restarts_total` | counter | Restarts grove made, by `group`, over retained history |
+| `grove_jobs_total` | counter | Jobs seen, by `group` and `outcome`, over retained history |
+| `grove_image_store_bytes` | gauge | Bytes the Docker image store takes, by `host` |
+| `grove_image_store_reclaimable_bytes` | gauge | Bytes `docker image prune` would free, by `host` |
+| `grove_host_work_dir_bytes` | gauge | Bytes every managed work dir takes, by `host` |
+| `grove_work_dir_bytes` | gauge | Bytes one seat work dir takes, by `host` and `runner` |
+
+The two halves of that table are fresh in different ways. The fleet gauges come from the last tick, so `grove_snapshot_age_seconds` is what tells "no runner is online" apart from "no tick has run since the daemon died". Alert on the age first, and on anything else second. The counters, the tick stamps and `grove_daemon_running` are read out of SQLite on every scrape, so they are current whatever the daemon is doing.
+
+`state` on `grove_runners` is one reading of a seat, joining what the host said with what the forge said. It is `busy` when the forge says busy, `missing` when the container or the unit is not there, `online` when the host says running and the forge says online, `offline` otherwise, and `unknown` for a seat on a host that did not answer. Only a full tick calls a forge, so `busy` appears after one and not between them. Join a missing-seat alert with reachability anyway, so a host outage fires once rather than once per seat.
+
+```
+grove_runners{state="missing"} > 0
+  and on (host) grove_host_reachable == 1
+```
+
+Two things are worth knowing about the counters. History pruning at `history.retention` drops the rows they are counted from, which makes them go down. Prometheus reads that as a counter reset and `rate()` handles it, so the graphs stay right. They are also keyed by group through the active records, so a retired seat's history stops being counted, which is a reset for the same reason and the honest answer: the seat no longer exists.
+
+### The gitlab-runner re-export
+
+`gitlab-runner` publishes its own metrics, and grove can carry them out on the same endpoint. Set `raw.metrics_port` on a GitLab Docker group.
+
+```yaml
+    raw:
+      metrics_port: 9252
+```
+
+grove then writes `listen_address = ":9252"` into that seat's `config.toml`, publishes `127.0.0.1:<metrics_port + n - 1>:9252` on the host for seat n, and scrapes each seat with `curl` over the same SSH connection the ticks use. A group of three seats starting at 9252 takes 9252, 9253 and 9254, wherever those seats are placed. Every sample gains a `grove_runner` and a `host` label, so two seats never collide, and both expositions merge into one valid response with each family's `HELP` and `TYPE` appearing once. `grove_runner` is namespaced because `gitlab-runner` exports a `runner` label of its own, and `host` is the label grove's own metrics use for the machine, so one PromQL join covers both halves of the endpoint. A label grove is about to add that a sample already carries is left alone, so nothing the runner exports is ever overwritten or repeated. The port stays on the host's loopback and never reaches the network.
+
+One scrape per seat is reused for `metrics.scrape_cache`, ten seconds by default, so two Prometheus servers do not double the `curl` calls landing on your hosts.
+
+`raw.metrics_port` is GitLab only. A GitHub Actions runner exposes no metrics endpoint at all, and a native seat has no container to publish a port from. The whole range has to fit under 65535, so a base that pushes the group's last seat above it is a config error rather than a `docker run` failure at apply time.
+
+The published port is part of `docker run`, so adding `raw.metrics_port` to a group takes effect the next time grove creates the container, not on the next apply. `grove apply` recreates a seat when its container is gone, so the quickest way is to remove the container and let the next tick rebuild it.
+
+Point Prometheus at the exporter, not at the seats.
+
+```yaml
+scrape_configs:
+  - job_name: grove
+    static_configs: [{ targets: ["127.0.0.1:9130"] }]
+```
 
 ## The daemon
 
@@ -571,6 +734,15 @@ The state directory is created mode `0700` and `grove.db` mode `0600`, because t
 
 SQLite writes `grove.db-wal` beside the database while grove runs, and that file gets whatever the umask allows. The `0700` directory is what keeps it private, so leave the directory mode alone even if the `-wal` file looks loose.
 
+## What grove does not do
+
+- **Provisioning.** grove manages runner artifacts only. Docker, Xcode and system packages are somebody else's job, and `doctor` says exactly which is missing.
+- **Adoption.** grove never imports an existing runner. It reports one as unmanaged and leaves it alone.
+- **A web interface.** Terminal and Prometheus only.
+- **GitHub Apps.** A personal access token and `gh` delegation, in this release. The auth block is a tagged union, so adding one later touches nothing else.
+- **Secret scanning on your hosts.** grove checks the credentials it uses. It does not read your hosts looking for credentials somebody else left lying about. A GitLab registration token in a world-readable `README.md` is a real problem and grove will not find it for you.
+- **Moving the Docker image store.** grove reports its size per host and warns when it grows. Where it lives belongs to OrbStack or Docker Desktop.
+
 ## Develop
 
 ```bash
@@ -588,3 +760,7 @@ Tests sit next to the code they cover as `*.test.ts`. Nothing in the suite opens
 ## License
 
 MIT
+
+---
+
+Milestone 6 of six is complete. grove now does everything the design spec describes.

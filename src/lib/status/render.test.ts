@@ -27,6 +27,7 @@ function report(overrides: Partial<StatusReport> = {}): StatusReport {
     rows: [row()],
     sharedRunners: [],
     suspects: [],
+    storage: [],
     unreachableHosts: [],
     unreachableForges: [],
     ok: true,
@@ -104,6 +105,7 @@ describe('renderStatusReport, managers', () => {
   const base = {
     configPath: '/tmp/grove.yaml',
     suspects: [],
+    storage: [],
     unreachableHosts: [],
     unreachableForges: [],
     ok: true,
@@ -205,6 +207,7 @@ describe('renderStatusReport, the stack column', () => {
         ],
         sharedRunners: [],
         suspects: [],
+        storage: [],
         unreachableHosts: [],
         unreachableForges: [],
         ok: true,
@@ -289,5 +292,60 @@ describe('the daemon and the suspect sections', () => {
     expect(text).toContain('Suspect runners');
     expect(text).toContain('grove-ios-1');
     expect(text).toContain('busy for 118m');
+  });
+});
+
+describe('renderStatusReport, storage', () => {
+  const measured = {
+    host: 'mac',
+    docker: {
+      imagesBytes: 12.3 * 1024 ** 3,
+      imagesReclaimableBytes: 4.1 * 1024 ** 3,
+      containersBytes: 0,
+      volumesBytes: 0,
+      buildCacheBytes: 0,
+    },
+    workDirBytes: 2 * 1024 ** 3,
+    workDirs: [{ name: 'grove-overload-arm-1', bytes: 2 * 1024 ** 3 }],
+  };
+
+  it('prints a row per host with images, reclaimable and work dirs', () => {
+    const text = renderStatusReport(
+      { ...report(), storage: [measured] },
+      { color: false },
+    );
+    expect(text).toContain('Storage');
+    expect(text).toContain('12.3 GiB');
+    expect(text).toContain('4.1 GiB');
+    expect(text).toContain('2.0 GiB');
+    expect(text).toContain('grove-overload-arm-1');
+  });
+
+  it('names what could not be measured instead of printing a zero', () => {
+    const text = renderStatusReport(
+      {
+        ...report(),
+        storage: [
+          {
+            host: 'atlas',
+            dockerError: 'Cannot connect to the Docker daemon.',
+            workDirs: [],
+          },
+        ],
+      },
+      { color: false },
+    );
+    expect(text).toContain('Cannot connect to the Docker daemon.');
+    expect(text).not.toContain('0 B');
+  });
+
+  it('prints no section at all when nothing was measured', () => {
+    const text = renderStatusReport(
+      { ...report(), storage: [] },
+      {
+        color: false,
+      },
+    );
+    expect(text).not.toContain('Storage');
   });
 });

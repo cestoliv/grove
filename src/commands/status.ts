@@ -4,6 +4,11 @@ import { DAEMON_LOCK_FILE, daemonLockPath } from '../lib/daemon/paths.js';
 import { EXIT_OK, EXIT_UNREACHABLE } from '../lib/exit-codes.js';
 import { observeFleet, persistSystemIds } from '../lib/reconcile/index.js';
 import {
+  type HostStorage,
+  readHostStorage,
+  seatWorkDirTargets,
+} from '../lib/stack/index.js';
+import {
   META_DAEMON_PID,
   META_LAST_FAST_TICK,
   META_LAST_FULL_TICK,
@@ -16,6 +21,7 @@ import {
   livenessFor,
   type SuspectRow,
 } from '../lib/status/report.js';
+import type { Transport } from '../lib/transport/index.js';
 import type { FleetContext } from './context.js';
 import { openFleetOrExit } from './pipeline.js';
 import type { PlanCommandOptions } from './plan.js';
@@ -95,9 +101,32 @@ export async function runStatus(
       ...(lastFullTick === undefined ? {} : { lastFullTick }),
     };
 
+    // Two commands per reachable host: the image store and the work dirs.
+    // An unreachable host contributes no row, because the closing line
+    // already names it and a row of dashes adds nothing.
+    const storage: HostStorage[] = await Promise.all(
+      observed.hosts
+        .filter((host) => host.reachable)
+        .map((host) =>
+          readHostStorage(
+            fleet.transports.get(host.host) as Transport,
+            host.host,
+            seatWorkDirTargets(fleet.loaded.config, host.host, host.home),
+            {
+              docker: fleet.loaded.config.groups.some(
+                (group) =>
+                  group.stack === 'docker' &&
+                  group.placement[host.host] !== undefined,
+              ),
+            },
+          ),
+        ),
+    );
+
     const report = buildStatusReport(fleet.loaded, observed, records, {
       suspects,
       daemon,
+      storage,
     });
 
     // History, never a decision. A sample per managed runner per run.

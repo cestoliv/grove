@@ -548,6 +548,47 @@ export class StateStore {
   }
 
   /**
+   * Restarts per seat, over whatever history has not been pruned. The
+   * exporter turns it into a counter, and a retention prune is a counter
+   * reset, which is a thing Prometheus already understands.
+   */
+  restartCounts(): Array<{ runnerId: number; count: number }> {
+    const rows = this.db
+      .prepare(
+        `SELECT runner_id, COUNT(*) AS n FROM events
+         WHERE kind = 'restarted' GROUP BY runner_id`,
+      )
+      .all() as Row[];
+    return rows.map((row) => ({
+      runnerId: Number(row.runner_id),
+      count: Number(row.n),
+    }));
+  }
+
+  /**
+   * Jobs per seat and outcome. A job grove is still watching has no outcome,
+   * and is counted as `open` rather than dropped, because a seat that has
+   * been busy for an hour is exactly what somebody is looking for.
+   */
+  jobOutcomeCounts(): Array<{
+    runnerId: number;
+    outcome: string;
+    count: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT runner_id, COALESCE(outcome, 'open') AS outcome, COUNT(*) AS n
+         FROM jobs GROUP BY runner_id, COALESCE(outcome, 'open')`,
+      )
+      .all() as Row[];
+    return rows.map((row) => ({
+      runnerId: Number(row.runner_id),
+      outcome: String(row.outcome),
+      count: Number(row.n),
+    }));
+  }
+
+  /**
    * Drop history older than the cutoff. Records, registrations and watches
    * stay, because none of them is history: a record is ownership proof, a
    * registration holds a token GitLab shows once, and a watch is what the
