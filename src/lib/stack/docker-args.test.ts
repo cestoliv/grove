@@ -147,10 +147,31 @@ describe('buildEntrypointCommand', () => {
       registration,
     });
     expect(buildEntrypointCommand(spec)).toBe(
-      "./config.sh --url 'https://github.com/Overload-coach' --token 'AABBCC' " +
-        "--name 'grove-overload-arm-1' --work '/Volumes/ci/grove/overload-arm-1' " +
-        "--unattended --replace --labels 'arm64' && ./run.sh",
+      "if [ ! -f .runner ]; then ./config.sh --url 'https://github.com/Overload-coach' " +
+        "--token 'AABBCC' --name 'grove-overload-arm-1' " +
+        "--work '/Volumes/ci/grove/overload-arm-1' " +
+        "--unattended --replace --labels 'arm64'; fi && ./run.sh",
     );
+  });
+
+  // `docker start` on a stopped seat runs the container command again, and a
+  // second config.sh would fail with "already configured" and take run.sh
+  // down with it. The guard is what makes a daemon restart, a host reboot
+  // and an `apply` start survive without a registration token nobody can
+  // mint again an hour later.
+  it('configures only when the runner has not registered yet', () => {
+    const spec = buildRunnerSpec({
+      group: group(),
+      host,
+      index: 1,
+      registration,
+    });
+    const command = buildEntrypointCommand(spec);
+    expect(command.startsWith('if [ ! -f .runner ]; then ./config.sh ')).toBe(
+      true,
+    );
+    // run.sh sits outside the guard, so a restart always starts the runner.
+    expect(command.endsWith('; fi && ./run.sh')).toBe(true);
   });
 
   it('omits --labels when the group declares none', () => {
