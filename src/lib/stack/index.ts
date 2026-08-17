@@ -1,4 +1,6 @@
 export {
+  buildFailureLine,
+  buildSystemIdScript,
   DockerStack,
   type DockerStackOptions,
   type LogsOptions,

@@ -121,7 +121,7 @@ GitLab's `/groups/:id/runners` endpoint answers for the group and for its subgro
 
 #### Which manager is which container
 
-GitLab's managers endpoint exposes a `system_id` for each running process and no name at all, so nothing in the API says which manager is which container. `gitlab-runner` writes that id to `.runner_system_id` next to `config.toml` at first start. grove mounts that directory from the host, reads the file on every pass, and stores the id on the runner's record.
+GitLab's managers endpoint exposes a `system_id` for each running process and no name at all, so nothing in the API says which manager is which container. `gitlab-runner` writes that id to `.runner_system_id` next to `config.toml` at first start. grove mounts that directory from the host, reads the file on every pass, and stores the id on the runner's record. On Linux `gitlab-runner` runs as root and writes the file `0600 root:root`, which an unprivileged ssh user cannot read, so a host that comes back empty is asked again through `docker exec` on the container. Both are the same file through the bind mount, so a host that can read its own copy never pays the exec.
 
 A container that has never run has no id to read. grove stores what it reads on `grove status` and on `grove apply`, so a manager shows up from the first of those that follows its container's first start. `grove plan` never writes to the database, because writing is an act, so a manager grove has not stored yet reads as offline in a plan.
 
