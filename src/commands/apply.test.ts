@@ -1,8 +1,10 @@
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { StateLock } from '../lib/daemon/lock.js';
 import { FakeForgeClient } from '../lib/forge/index.js';
 import { StateStore } from '../lib/state/index.js';
 import { FakeTransport } from '../lib/transport/index.js';
@@ -79,7 +81,7 @@ function options(
 ) {
   return {
     config: join(dir, 'grove.yaml'),
-    env: {},
+    env: { GROVE_STATE_DIR: join(dir, 'state') },
     store,
     connect: () => transport,
     resolveToken: async () => 'token',
@@ -461,5 +463,36 @@ groups:
         '/Users/olivier/Library/LaunchAgents/com.cestoliv.grove.ios-1.plist',
       ),
     ).toContain('/Applications/Xcode.app/Contents/Developer');
+  });
+});
+
+describe('runApply and the state lock', () => {
+  it('refuses to run while the daemon holds the lock', async () => {
+    await write();
+    const held = StateLock.acquire({
+      path: join(dir, 'state', 'grove.pid'),
+      command: 'daemon',
+      pid: 77,
+      isPidAlive: () => true,
+    });
+    const errors: string[] = [];
+    const code = await runApply(
+      options(mac(), {
+        isPidAlive: () => true,
+        stderr: (text: string) => errors.push(text),
+      }),
+    );
+
+    expect(code).toBe(EXIT_UNREACHABLE);
+    expect(errors.join('\n')).toContain('pid 77');
+    // Nothing was created, because nothing ran.
+    expect(store.activeRunners()).toEqual([]);
+    held.release();
+  });
+
+  it('releases the lock when it is done', async () => {
+    await write();
+    await runApply(options(mac(), { isPidAlive: () => false }));
+    expect(existsSync(join(dir, 'state', 'grove.pid'))).toBe(false);
   });
 });

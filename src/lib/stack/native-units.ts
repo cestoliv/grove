@@ -2,6 +2,13 @@ import {
   runnerNameFromLaunchdLabel,
   runnerNameFromSystemdUnit,
 } from '../naming.js';
+import {
+  escapeXml,
+  plistString,
+  systemdEnvironment,
+  systemdQuoted,
+  systemdSpecifiers,
+} from '../unit-format.js';
 import type { NativeRunnerSpec } from './native-args.js';
 import type { NativeUnit } from './types.js';
 
@@ -42,19 +49,6 @@ export function launchctlKickstartArgs(
   return restart
     ? ['kickstart', '-k', `gui/${uid}/${label}`]
     : ['kickstart', `gui/${uid}/${label}`];
-}
-
-export function escapeXml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;');
-}
-
-function plistString(key: string, value: string): string {
-  return `  <key>${key}</key>\n  <string>${escapeXml(value)}</string>`;
 }
 
 // The drain timeout in whole seconds, floored at 1. launchd's ExitTimeOut and
@@ -114,30 +108,6 @@ export function buildLaunchdPlist(spec: NativeRunnerSpec): string {
     '</plist>',
     '',
   ].join('\n');
-}
-
-// systemd expands a bare `%` as the start of a specifier (`%h`, `%%`, ...) in
-// every unit value, so a literal `%` is doubled wherever it appears.
-function systemdSpecifiers(value: string): string {
-  return value.replaceAll('%', '%%');
-}
-
-// A quoted value also goes through systemd's own quoting syntax, which reads a
-// backslash and a quote. An unquoted field does not, which is why Description
-// only gets the doubling above.
-function systemdEscape(value: string): string {
-  return systemdSpecifiers(value)
-    .replaceAll('\\', '\\\\')
-    .replaceAll('"', '\\"');
-}
-
-function systemdQuoted(value: string): string {
-  return `"${systemdEscape(value)}"`;
-}
-
-function systemdEnvironment(name: string, value: string): string {
-  // systemd splits an unquoted value on whitespace, so every value is quoted.
-  return `Environment="${name}=${systemdEscape(value)}"`;
 }
 
 export function buildSystemdUnit(spec: NativeRunnerSpec): string {
@@ -226,3 +196,6 @@ export function parseSystemctlList(text: string): NativeUnit[] {
   }
   return units;
 }
+
+// Re-exported so `stack/index.ts` keeps offering the name it always has.
+export { escapeXml };

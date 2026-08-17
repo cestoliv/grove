@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Action } from './actions.js';
 import {
+  ACTION_VERBS,
   actionStack,
   describeAction,
   hasDestructive,
@@ -245,5 +246,60 @@ describe('describeAction, native seats', () => {
     ).toBe(
       'create      grove-ios-1  on mac, registering at gh-overload, native',
     );
+  });
+});
+
+describe('the daemon actions', () => {
+  const restart = {
+    kind: 'restart-runner' as const,
+    host: 'mac',
+    name: 'grove-ios-1',
+    recordId: 4,
+    reason: 'busy for 118m and nothing under the work dir changed',
+    destructive: true as const,
+  };
+
+  it('describes a restart, naming the reason and the two things it skips', () => {
+    expect(describeAction(restart)).toContain('restart');
+    expect(describeAction(restart)).toContain('grove-ios-1');
+    expect(describeAction(restart)).toContain('on mac');
+    expect(describeAction(restart)).toContain(
+      'busy for 118m and nothing under the work dir changed',
+    );
+    expect(describeAction(restart)).toContain('skipping the drain');
+    expect(describeAction(restart)).toContain('wiping the work dir');
+  });
+
+  it('names the stack of a native restart and stays silent for Docker', () => {
+    expect(describeAction({ ...restart, stack: 'native' })).toContain(
+      ', native',
+    );
+    expect(describeAction(restart)).not.toContain(', docker');
+  });
+
+  it('counts a restart as destructive, because it kills a live job', () => {
+    expect(hasDestructive([restart])).toBe(true);
+    expect(isReport(restart)).toBe(false);
+  });
+
+  it('treats a suspect as a report, so nothing ever executes one', () => {
+    const suspect = {
+      kind: 'report-suspect' as const,
+      host: 'mac',
+      name: 'grove-ios-1',
+      reason: 'the forge says busy and grove has no host signal',
+      destructive: false as const,
+    };
+    expect(isReport(suspect)).toBe(true);
+    expect(hasDestructive([suspect])).toBe(false);
+    expect(describeAction(suspect)).toContain('suspect');
+    expect(describeAction(suspect)).toContain(
+      'the forge says busy and grove has no host signal',
+    );
+  });
+
+  it('gives every kind a verb', () => {
+    expect(ACTION_VERBS['restart-runner']).toBe('restart');
+    expect(ACTION_VERBS['report-suspect']).toBe('suspect');
   });
 });

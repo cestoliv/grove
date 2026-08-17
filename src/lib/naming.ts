@@ -54,6 +54,36 @@ export function isManagedName(name: string): boolean {
   return parseManagedName(name) !== null;
 }
 
+/**
+ * The guard in front of every command that deletes inside a seat's work dir.
+ * It ties the path back to the seat that owns it: absolute, no `..` segment to
+ * climb out through, a last segment that is exactly the `<group>-<index>` the
+ * runner name spells, and a parent above it. Only a path grove itself built
+ * with `runnerDir` passes, so a home directory, a work root and a filesystem
+ * root are all refused.
+ */
+export function assertRunnerWorkDir(workDir: string, name: string): void {
+  const parsed = parseManagedName(name);
+  if (parsed === null) {
+    throw new Error(
+      `refusing to wipe ${workDir}: ${name} is not the name of a grove seat`,
+    );
+  }
+  const suffix = `/${parsed.group}-${parsed.index}`;
+  if (
+    !workDir.startsWith('/') ||
+    !workDir.endsWith(suffix) ||
+    // A bare `/<group>-<index>` has no parent, so it is a top-level directory
+    // rather than a seat under a work root.
+    workDir.length === suffix.length ||
+    workDir.split('/').includes('..')
+  ) {
+    throw new Error(
+      `refusing to wipe ${workDir}: it is not the work directory of ${name}`,
+    );
+  }
+}
+
 // The description grove gives the one runner entity a GitLab group owns. It
 // carries no index, because every seat in the group shares it.
 export function sharedRunnerName(group: string): string {
@@ -161,4 +191,28 @@ export function runnerNameFromSystemdUnit(unit: string): string | null {
   }
   const name = unit.slice(0, -SYSTEMD_UNIT_SUFFIX.length);
   return parseManagedName(name) === null ? null : name;
+}
+
+// The daemon's own names are fixed rather than derived, because there is
+// exactly one of it per control node. Neither parses as a managed runner
+// name, which is what keeps it out of every supervisor listing grove reads.
+export const DAEMON_LABEL = `${LAUNCHD_LABEL_PREFIX}daemon`;
+export const SYSTEMD_DAEMON_UNIT_NAME = 'grove-daemon';
+export const DAEMON_UNIT = `${SYSTEMD_DAEMON_UNIT_NAME}${SYSTEMD_UNIT_SUFFIX}`;
+
+export function daemonPlistPath(home: string): string {
+  return `${trimTrailingSlash(home)}/${LAUNCH_AGENTS_DIR}/${DAEMON_LABEL}.plist`;
+}
+
+export function daemonUnitPath(home: string): string {
+  return `${trimTrailingSlash(home)}/${SYSTEMD_USER_DIR}/${DAEMON_UNIT}`;
+}
+
+// The marker stuck detection compares the work dir against. A sibling of the
+// work dir rather than a child, so `grove apply --clean` cannot take it with
+// the caches and leave the next tick with nothing to compare.
+export const ACTIVITY_STAMP_SUFFIX = '.stamp';
+
+export function activityStampFor(workDir: string): string {
+  return `${trimTrailingSlash(workDir)}${ACTIVITY_STAMP_SUFFIX}`;
 }

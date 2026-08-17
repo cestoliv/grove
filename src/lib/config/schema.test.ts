@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { issuesFromZod } from './errors.js';
 import {
   configSchema,
+  DEFAULT_HISTORY_RETENTION_MS,
   DEFAULT_TICK,
   forgeSchema,
   groupSchema,
+  historySchema,
   hostSchema,
   placementSchema,
   scopeSchema,
@@ -372,5 +374,21 @@ describe('configSchema', () => {
     expect(result.success).toBe(false);
     if (result.success) return;
     expect(result.error.issues[0]?.code).toBe('unrecognized_keys');
+  });
+});
+
+describe('history', () => {
+  it('parses a retention duration into milliseconds', () => {
+    const parsed = historySchema.parse({ retention: '30d' });
+    expect(parsed.retention).toBe(30 * 24 * 60 * 60 * 1000);
+  });
+
+  it('accepts an empty block and refuses an unknown key', () => {
+    expect(historySchema.parse({})).toEqual({});
+    expect(() => historySchema.parse({ keep: '30d' })).toThrow();
+  });
+
+  it('defaults to ninety days', () => {
+    expect(DEFAULT_HISTORY_RETENTION_MS).toBe(90 * 24 * 60 * 60 * 1000);
   });
 });

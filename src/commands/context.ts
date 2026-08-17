@@ -26,6 +26,7 @@ import {
   type ConnectFn,
   connect as defaultConnect,
   LocalTransport,
+  type SshTransportOptions,
   type Transport,
 } from '../lib/transport/index.js';
 
@@ -66,6 +67,10 @@ export interface OpenFleetOptions {
   // setup is already broken. Set false and no token is resolved, so a missing
   // PAT cannot stop a read.
   forges?: boolean;
+  // The daemon holds its connections between ticks and asks for a
+  // ControlPersist window that outlives its fast tick. Every other command
+  // takes the default.
+  ssh?: SshTransportOptions;
 }
 
 export type OpenFleet = (options: OpenFleetOptions) => Promise<FleetContext>;
@@ -88,7 +93,11 @@ export async function openFleet(
   const transports = new Map<string, Transport>();
   const stacks = new Map<string, DockerStack>();
   for (const [name, host] of Object.entries(loaded.config.hosts)) {
-    const transport = connectFn(name, host);
+    const transport = connectFn(
+      name,
+      host,
+      options.ssh === undefined ? undefined : { ssh: options.ssh },
+    );
     transports.set(name, transport);
     stacks.set(name, new DockerStack({ transport, host: name }));
   }

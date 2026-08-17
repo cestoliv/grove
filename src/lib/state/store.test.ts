@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MIGRATIONS, SCHEMA_VERSION } from './migrations.js';
-import { StateStore } from './store.js';
+import { META_LAST_FULL_TICK, StateStore } from './store.js';
 
 let store: StateStore;
 let clock = 1_000;
@@ -340,7 +340,7 @@ describe('StateStore, on disk', () => {
     const migrated = StateStore.open(path);
     try {
       expect(migrated.schemaVersion()).toBe(SCHEMA_VERSION);
-      expect(SCHEMA_VERSION).toBe(3);
+      expect(SCHEMA_VERSION).toBe(4);
       const [record] = migrated.activeRunners();
       expect(record.name).toBe('grove-overload-arm-1');
       expect(record.systemId).toBeNull();
@@ -350,5 +350,172 @@ describe('StateStore, on disk', () => {
     } finally {
       migrated.close();
     }
+  });
+});
+
+describe('the daemon state', () => {
+  function seat(store: StateStore): number {
+    return store.createRunner({
+      group: 'overload-arm',
+      index: 1,
+      host: 'mac',
+      forge: 'gh-overload',
+      name: 'grove-overload-arm-1',
+    }).id;
+  }
+
+  it('stores and reads a meta key', () => {
+    const store = StateStore.open(':memory:');
+    expect(store.getMeta(META_LAST_FULL_TICK)).toBeUndefined();
+    store.setMeta(META_LAST_FULL_TICK, '1700000000000');
+    store.setMeta(META_LAST_FULL_TICK, '1700000060000');
+    expect(store.getMeta(META_LAST_FULL_TICK)).toBe('1700000060000');
+    store.close();
+  });
+
+  it('hands back an empty watch for a seat it has never watched', () => {
+    const store = StateStore.open(':memory:');
+    const id = seat(store);
+    expect(store.watchFor(id)).toEqual({
+      runnerId: id,
+      busySince: null,
+      unregisteredSince: null,
+      suspectSince: null,
+      suspectReason: null,
+    });
+    store.close();
+  });
+
+  it('upserts a watch', () => {
+    const store = StateStore.open(':memory:');
+    const id = seat(store);
+    store.setWatch(id, {
+      busySince: 100,
+      unregisteredSince: null,
+      suspectSince: 200,
+      suspectReason: 'the work dir is quiet',
+    });
+    store.setWatch(id, {
+      busySince: 300,
+      unregisteredSince: 400,
+      suspectSince: null,
+      suspectReason: null,
+    });
+    expect(store.watchFor(id)).toEqual({
+      runnerId: id,
+      busySince: 300,
+      unregisteredSince: 400,
+      suspectSince: null,
+      suspectReason: null,
+    });
+    store.close();
+  });
+
+  it('opens a job, closes it, and computes the duration', () => {
+    let at = 1000;
+    const store = StateStore.open(':memory:', { now: () => at });
+    const id = seat(store);
+    const started = store.startJob(id);
+    expect(started.endedAt).toBeNull();
+    expect(store.openJob(id)?.id).toBe(started.id);
+
+    at = 61_000;
+    const ended = store.endJob(id, 'unknown');
+    expect(ended?.durationMs).toBe(60_000);
+    expect(ended?.outcome).toBe('unknown');
+    expect(store.openJob(id)).toBeUndefined();
+    expect(store.jobsFor(id)).toHaveLength(1);
+    store.close();
+  });
+
+  it('closes only the newest open job and ignores a seat with none', () => {
+    const store = StateStore.open(':memory:');
+    const id = seat(store);
+    expect(store.endJob(id, 'unknown')).toBeUndefined();
+    store.startJob(id, 10);
+    store.startJob(id, 20);
+    const ended = store.endJob(id, 'unknown', 30);
+    expect(ended?.startedAt).toBe(20);
+    expect(store.openJob(id)?.startedAt).toBe(10);
+    store.close();
+  });
+
+  it('counts restarts inside a window and finds the newest one', () => {
+    let at = 1000;
+    const store = StateStore.open(':memory:', { now: () => at });
+    const id = seat(store);
+    store.recordEvent(id, 'restarted', 'wedged');
+    at = 5000;
+    store.recordEvent(id, 'restarted', 'wedged');
+    at = 6000;
+    store.recordEvent(id, 'started');
+
+    expect(store.countEventsSince(id, 'restarted', 0)).toBe(2);
+    expect(store.countEventsSince(id, 'restarted', 2000)).toBe(1);
+    expect(store.lastEventAt(id, 'restarted')).toBe(5000);
+    expect(store.lastEventAt(id, 'deregistered')).toBeUndefined();
+    store.close();
+  });
+
+  it('prunes events, liveness and jobs older than the cutoff', () => {
+    let at = 1000;
+    const store = StateStore.open(':memory:', { now: () => at });
+    const id = seat(store);
+    store.recordEvent(id, 'started');
+    store.recordLiveness(id, 'online');
+    store.startJob(id, 1000);
+    store.endJob(id, 'unknown', 1500);
+
+    at = 9000;
+    store.recordEvent(id, 'stopped');
+    store.recordLiveness(id, 'offline');
+
+    expect(store.pruneHistory(5000)).toEqual({
+      events: 1,
+      liveness: 1,
+      jobs: 1,
+    });
+    expect(store.eventsFor(id).map((event) => event.kind)).toEqual(['stopped']);
+    expect(store.livenessFor(id)).toHaveLength(1);
+    expect(store.jobsFor(id)).toEqual([]);
+    // The record itself is not history, so pruning never touches it.
+    expect(store.activeRunners()).toHaveLength(1);
+    store.close();
+  });
+
+  it('keeps a job that is still open, however old it is', () => {
+    const store = StateStore.open(':memory:');
+    const id = seat(store);
+    store.startJob(id, 1000);
+
+    // An open job is not history yet. The `endJob` a later tick runs would
+    // find nothing, and grove would lose a job it is still watching.
+    expect(store.pruneHistory(5000).jobs).toBe(0);
+    expect(store.openJob(id)?.startedAt).toBe(1000);
+    store.close();
+  });
+
+  it('clears every suspect', () => {
+    const store = StateStore.open(':memory:');
+    const id = seat(store);
+    store.setWatch(id, {
+      busySince: 100,
+      unregisteredSince: 200,
+      suspectSince: 300,
+      suspectReason: 'the work dir is quiet',
+    });
+
+    store.clearSuspects();
+
+    // Only the suspicion goes. The busy clock is what the next tick compares
+    // against, and it is not a verdict.
+    expect(store.watchFor(id)).toEqual({
+      runnerId: id,
+      busySince: 100,
+      unregisteredSince: 200,
+      suspectSince: null,
+      suspectReason: null,
+    });
+    store.close();
   });
 });

@@ -88,6 +88,24 @@ export interface RetireRecordAction {
   destructive: true;
 }
 
+// The daemon produces this and nothing else does. A stuck runner is alive and
+// lying about it, so the restart skips the drain by definition: the job it
+// would wait for is the problem. The work dir goes with it, because corrupt
+// work-dir state is a plausible cause of the wedge.
+export interface RestartRunnerAction {
+  kind: 'restart-runner';
+  host: string;
+  name: string;
+  stack?: StackKind;
+  // Always set. grove restarts a seat it has a record for and no other, and
+  // the event row that records the restart hangs off this id.
+  recordId: number;
+  // The two signals in one sentence, so the plan line, the log line and the
+  // event row all say the same thing.
+  reason: string;
+  destructive: true;
+}
+
 export interface ReportUnmanagedAction {
   kind: 'report-unmanaged';
   name: string;
@@ -120,6 +138,17 @@ export interface ReportUnsupportedAction {
   destructive: false;
 }
 
+// The daemon reports suspects through SuperviseResult.suspects. This kind
+// exists so a suspect renders like any other finding, in a plan line and in
+// the log, and never through the executor.
+export interface ReportSuspectAction {
+  kind: 'report-suspect';
+  host?: string;
+  name: string;
+  reason: string;
+  destructive: false;
+}
+
 export type Action =
   | CreateRunnerAction
   | StartContainerAction
@@ -128,10 +157,12 @@ export type Action =
   | DeregisterRunnerAction
   | DeleteSharedRunnerAction
   | RetireRecordAction
+  | RestartRunnerAction
   | ReportUnmanagedAction
   | ReportOrphanRecordAction
   | ReportDegradedAction
-  | ReportUnsupportedAction;
+  | ReportUnsupportedAction
+  | ReportSuspectAction;
 
 export const ACTION_VERBS: Record<Action['kind'], string> = {
   'create-runner': 'create',
@@ -141,10 +172,12 @@ export const ACTION_VERBS: Record<Action['kind'], string> = {
   'deregister-runner': 'deregister',
   'delete-shared-runner': 'delete',
   'retire-record': 'retire',
+  'restart-runner': 'restart',
   'report-unmanaged': 'unmanaged',
   'report-orphan-record': 'orphan',
   'report-degraded': 'degraded',
   'report-unsupported': 'skipped',
+  'report-suspect': 'suspect',
 };
 
 const VERB_WIDTH = 10;
@@ -203,6 +236,12 @@ export function describeAction(action: Action): string {
       );
     case 'retire-record':
       return line(action.kind, action.name, 'in the grove database');
+    case 'restart-runner':
+      return line(
+        action.kind,
+        action.name,
+        `on ${action.host}, ${action.reason}, skipping the drain and wiping the work dir${stackSuffix(action)}`,
+      );
     case 'report-unmanaged':
       return line(action.kind, action.name, action.where);
     case 'report-orphan-record':
@@ -211,6 +250,8 @@ export function describeAction(action: Action): string {
       return line(action.kind, action.target, action.reason);
     case 'report-unsupported':
       return line(action.kind, action.group, action.reason);
+    case 'report-suspect':
+      return line(action.kind, action.name, action.reason);
   }
 }
 

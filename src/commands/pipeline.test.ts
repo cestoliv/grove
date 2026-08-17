@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { EXIT_INVALID_CONFIG } from '../lib/exit-codes.js';
+import { StateLock } from '../lib/daemon/lock.js';
+import { EXIT_INVALID_CONFIG, EXIT_UNREACHABLE } from '../lib/exit-codes.js';
 import { FakeForgeClient } from '../lib/forge/index.js';
 import type {
   Action,
@@ -13,7 +14,12 @@ import type {
 import { StateStore } from '../lib/state/index.js';
 import { FakeTransport } from '../lib/transport/index.js';
 import type { FleetContext } from './context.js';
-import { confirmAndExecute, openFleetOrExit, planFleet } from './pipeline.js';
+import {
+  confirmAndExecute,
+  openFleetOrExit,
+  planFleet,
+  takeStateLockOrExit,
+} from './pipeline.js';
 
 const CONFIG = `
 hosts:
@@ -307,5 +313,41 @@ describe('confirmAndExecute', () => {
     } finally {
       await fleet.close();
     }
+  });
+});
+
+describe('takeStateLockOrExit', () => {
+  it('hands back a lock nobody else holds', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'grove-pipeline-lock-'));
+    // A directory of its own, so the operator's grove.pid is never touched.
+    const lock = takeStateLockOrExit(
+      { command: 'apply', stateDir: dir, isPidAlive: () => false },
+      () => undefined,
+    );
+    expect(typeof lock).not.toBe('number');
+    (lock as StateLock).release();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('names who holds it and exits rather than racing them', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'grove-pipeline-lock-'));
+    const held = StateLock.acquire({
+      path: join(dir, 'grove.pid'),
+      command: 'daemon',
+      pid: 77,
+      isPidAlive: () => true,
+    });
+    const errors: string[] = [];
+    const code = takeStateLockOrExit(
+      { command: 'apply', stateDir: dir, isPidAlive: () => true },
+      (text) => errors.push(text),
+    );
+
+    expect(code).toBe(EXIT_UNREACHABLE);
+    expect(errors.join('\n')).toContain('pid 77');
+    expect(errors.join('\n')).toContain('daemon');
+    expect(errors.join('\n')).toContain('grove plan');
+    held.release();
+    await rm(dir, { recursive: true, force: true });
   });
 });

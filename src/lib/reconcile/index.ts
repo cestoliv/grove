@@ -5,6 +5,8 @@ export {
   describeAction,
   hasDestructive,
   isReport,
+  type ReportSuspectAction,
+  type RestartRunnerAction,
 } from './actions.js';
 export {
   type ActionFailure,

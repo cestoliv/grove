@@ -70,3 +70,19 @@ describe('migrate', () => {
     expect(SCHEMA_VERSION).toBe(MIGRATIONS.length);
   });
 });
+
+describe('migration v4', () => {
+  it('adds the meta and runner_watch tables', () => {
+    const memory = new DatabaseSync(':memory:');
+    migrate(memory);
+    const names = (
+      memory
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .all() as Array<{ name: string }>
+    ).map((row) => row.name);
+    expect(names).toContain('meta');
+    expect(names).toContain('runner_watch');
+    expect(SCHEMA_VERSION).toBe(4);
+    memory.close();
+  });
+});

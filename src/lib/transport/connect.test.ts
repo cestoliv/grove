@@ -35,3 +35,16 @@ describe('connect', () => {
     expect(args).toContain('ConnectTimeout=3');
   });
 });
+
+describe('connect with ssh options', () => {
+  it('passes the ControlPersist window through to the transport', () => {
+    const transport = connect(
+      'atlas',
+      { type: 'ssh', host: 'atlas' },
+      { ssh: { controlPersist: '180' } },
+    ) as SshTransport;
+    expect(transport.argsFor('uname', ['-s']).join(' ')).toContain(
+      'ControlPersist=180',
+    );
+  });
+});

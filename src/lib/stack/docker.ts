@@ -1,3 +1,4 @@
+import { assertRunnerWorkDir } from '../naming.js';
 import { firstLine, shellQuote, type Transport } from '../transport/index.js';
 import {
   buildBuildArgs,
@@ -25,12 +26,9 @@ export interface LogsOptions {
 }
 
 function assertRunnerDir(dirs: RunnerDirs): void {
-  const suffix = `/${dirs.group}-${dirs.index}`;
-  if (!dirs.workDir.startsWith('/') || !dirs.workDir.endsWith(suffix)) {
-    throw new Error(
-      `refusing to wipe ${dirs.workDir}: it is not the work directory of ${dirs.name}`,
-    );
-  }
+  // One implementation of the work-dir guard, shared with the daemon's
+  // pruner, so a path that is unsafe to wipe here is unsafe to prune there.
+  assertRunnerWorkDir(dirs.workDir, dirs.name);
 }
 
 function assertConfigDir(dirs: RunnerDirs): void {

@@ -89,6 +89,32 @@ export const MIGRATIONS: string[] = [
   -- record can say where to go and take it down.
   ALTER TABLE runners ADD COLUMN stack TEXT NOT NULL DEFAULT 'docker';
   `,
+  `
+  -- Small facts about the control loop itself: when the last fast tick ran,
+  -- when the last full tick ran, when the daemon started. No runner sits
+  -- behind any of them, which is why they are not events.
+  CREATE TABLE meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  ) STRICT;
+
+  -- What one full tick has to tell the next about one seat. Every column is
+  -- an observation grove made, kept only so the next observation can be
+  -- compared with it. Losing the row costs one tick of latency and nothing
+  -- else, which is why this table and meta above are a documented exception
+  -- to "SQLite never decides", alongside the GitLab token in
+  -- group_registrations: both are carried between ticks, not decided by.
+  CREATE TABLE runner_watch (
+    runner_id INTEGER PRIMARY KEY REFERENCES runners (id) ON DELETE CASCADE,
+    -- When the forge first said busy, cleared the moment it says otherwise.
+    busy_since INTEGER,
+    -- When the forge first stopped listing a seat that is up on its host.
+    unregistered_since INTEGER,
+    -- One of the two stuck signals fired and the other did not.
+    suspect_since INTEGER,
+    suspect_reason TEXT
+  ) STRICT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

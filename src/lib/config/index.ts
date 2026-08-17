@@ -26,6 +26,7 @@ export {
 } from './paths.js';
 export { validateReferences } from './references.js';
 export {
+  DEFAULT_HISTORY_RETENTION_MS,
   DEFAULT_TICK,
   type ForgeAuth,
   type ForgeConfig,
@@ -36,7 +37,9 @@ export {
   GROUP_NAME_PATTERN,
   type GroupConfig,
   type GroveConfig,
+  type HistoryConfig,
   type HostConfig,
+  historySchema,
   type Level,
   type Placement,
   type Scope,

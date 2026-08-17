@@ -2,9 +2,15 @@
 # Copy this to grove.yaml and edit it. grove reads ./grove.yaml by default,
 # or the path in --config or GROVE_CONFIG.
 
-# How often the daemon checks the fleet. The daemon arrives in milestone 5,
-# and these values are parsed and reported until then.
+# How often the daemon checks the fleet. The fast tick is liveness only, over
+# one docker ps and one supervisor query per host. The full tick adds the
+# forge calls, stuck detection and pruning. Install the daemon with
+# "grove daemon install".
 tick: { fast: 2m, full: 30m }
+
+# How long grove keeps job history, lifecycle events and liveness samples in
+# grove.db. Pruned on the full tick. Defaults to 90d.
+history: { retention: 90d }
 
 # Hosts that run runners. The control node itself is type: local. Every other
 # host is type: ssh and is addressed by a ~/.ssh/config alias, so jump hosts,

@@ -6,7 +6,12 @@ import { ConfigError, type ConfigIssue, issuesFromZod } from './errors.js';
 import { interpolateEnv } from './interpolate.js';
 import { resolveConfigPath } from './paths.js';
 import { validateReferences } from './references.js';
-import { configSchema, DEFAULT_TICK, type GroveConfig } from './schema.js';
+import {
+  configSchema,
+  DEFAULT_HISTORY_RETENTION_MS,
+  DEFAULT_TICK,
+  type GroveConfig,
+} from './schema.js';
 import {
   type ConfigWarning,
   nativeOptionWarnings,
@@ -104,6 +109,10 @@ export async function loadConfig(
     tick: {
       fast: parsed.data.tick?.fast ?? DEFAULT_TICK.fast,
       full: parsed.data.tick?.full ?? DEFAULT_TICK.full,
+    },
+    history: {
+      retentionMs:
+        parsed.data.history?.retention ?? DEFAULT_HISTORY_RETENTION_MS,
     },
   };
 

@@ -1,5 +1,8 @@
+import { join } from 'node:path';
 import { ConfigError, CredentialError } from '../lib/config/index.js';
-import { EXIT_INVALID_CONFIG } from '../lib/exit-codes.js';
+import { LockHeldError, StateLock } from '../lib/daemon/lock.js';
+import { DAEMON_LOCK_FILE, daemonLockPath } from '../lib/daemon/paths.js';
+import { EXIT_INVALID_CONFIG, EXIT_UNREACHABLE } from '../lib/exit-codes.js';
 import { buildPlanReport, type PlanReport } from '../lib/plan/report.js';
 import { confirm } from '../lib/prompt.js';
 import {
@@ -25,6 +28,48 @@ export interface PipelineOptions extends OpenFleetOptions {
   // An acting command sets this. `plan` never does, because `plan` writes
   // nothing to the database.
   recordSystemIds?: boolean;
+  // Where grove.pid lives. Only a test sets it; every command resolves the
+  // state dir from the environment.
+  stateDir?: string;
+  isPidAlive?: (pid: number) => boolean;
+}
+
+export interface AcquireLockOptions {
+  command: string;
+  env?: NodeJS.ProcessEnv;
+  stateDir?: string;
+  isPidAlive?: (pid: number) => boolean;
+}
+
+/**
+ * The daemon converges the fleet every couple of minutes, and an operator
+ * reconciling the same hosts at the same moment would race it. One lock
+ * covers `apply`, `teardown` and the daemon. Every read-only command takes
+ * nothing, which is why the refusal names them.
+ */
+export function takeStateLockOrExit(
+  options: AcquireLockOptions,
+  stderr: (text: string) => void,
+): StateLock | number {
+  const path =
+    options.stateDir === undefined
+      ? daemonLockPath({ env: options.env ?? process.env })
+      : join(options.stateDir, DAEMON_LOCK_FILE);
+  try {
+    return StateLock.acquire({
+      path,
+      command: options.command,
+      ...(options.isPidAlive === undefined
+        ? {}
+        : { isPidAlive: options.isPidAlive }),
+    });
+  } catch (error) {
+    if (error instanceof LockHeldError) {
+      stderr(error.message);
+      return EXIT_UNREACHABLE;
+    }
+    throw error;
+  }
 }
 
 export interface PlannedFleet {

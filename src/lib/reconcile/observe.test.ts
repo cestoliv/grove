@@ -568,3 +568,41 @@ describe('observeFleet, native seats', () => {
     ]);
   });
 });
+
+describe('observeFleet with skipForges', () => {
+  it('calls no forge and reports none', async () => {
+    const client = new FakeForgeClient('gh-overload');
+    const observed = await observeFleet(config(), {
+      transports: transports({ mac: healthyMac() }),
+      forgeClients: new Map([['gh-overload', client]]),
+      skipForges: true,
+    });
+
+    expect(observed.forges).toEqual([]);
+    expect(client.scopesListed).toEqual([]);
+    expect(observed.hosts[0].reachable).toBe(true);
+  });
+
+  it('still runs the absent-disk guard, because a start needs it', async () => {
+    const observed = await observeFleet(config(), {
+      transports: transports({ mac: healthyMac() }),
+      // No client at all, which is what the fast tick would look like if the
+      // flag also emptied the group list.
+      forgeClients: new Map(),
+      skipForges: true,
+    });
+
+    expect(Object.keys(observed.hosts[0].workRoots)).toEqual(['overload-arm']);
+  });
+
+  it('leaves the milestone 4 behaviour alone when the flag is absent', async () => {
+    const observed = await observeFleet(config(), {
+      transports: transports({ mac: healthyMac() }),
+      forgeClients: new Map(),
+    });
+
+    expect(observed.forges).toEqual([]);
+    // No client means no manageable group, which is what `grove logs` relies on.
+    expect(Object.keys(observed.hosts[0].workRoots)).toEqual([]);
+  });
+});
