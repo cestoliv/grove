@@ -757,6 +757,10 @@ npm run build
 
 Tests sit next to the code they cover as `*.test.ts`. Nothing in the suite opens an SSH connection, calls a forge, or runs Docker. Anything that touches a host goes through `FakeTransport`, every forge call goes through a fake client or an injected `fetch`, and the state store opens `:memory:`.
 
+### Release
+
+A release is a version bump on `main`. When a push to `main` carries a `package.json` version that npm does not have yet, the `publish` workflow publishes it to npm under `latest` with OIDC provenance, then tags the commit `v<version>` and opens a GitHub Release with generated notes. To try a branch before it lands, add the `publish-dev` label to its PR. That publishes a throwaway prerelease `<version>-pr<N>.g<sha>` under a `pr-<N>` dist-tag, comments the install command on the PR, and removes the label so you can add it again.
+
 ## License
 
 MIT

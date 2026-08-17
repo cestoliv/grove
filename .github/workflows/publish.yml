@@ -19,7 +19,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # tag and GitHub Release
       id-token: write # OIDC: npm trusted publishing
     steps:
       - uses: actions/checkout@v5
@@ -29,6 +29,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm ci
+      # npm validates `bin` when it loads package.json, before prepublishOnly
+      # runs, so dist must exist first.
+      - run: npm run build
       - name: Resolve release
         id: meta
         run: |
@@ -43,6 +46,14 @@ jobs:
       - name: Publish @latest (OIDC, with provenance)
         if: steps.meta.outputs.publish == 'yes'
         run: npm publish --tag latest --access public
+      - name: Tag and GitHub Release
+        if: steps.meta.outputs.publish == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          gh release create "v$VERSION" --repo "${{ github.repository }}" \
+            --title "v$VERSION" --generate-notes --target "$GITHUB_SHA"
 
   # Pre-release: add the `publish-dev` label to a PR to publish a unique
   # prerelease version under a throwaway PR-scoped dist-tag. The label is
@@ -67,6 +78,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm ci
+      - run: npm run build
       - name: Resolve prerelease version
         id: meta
         run: |
