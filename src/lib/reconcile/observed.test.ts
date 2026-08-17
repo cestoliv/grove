@@ -6,6 +6,7 @@ import {
   describeWhere,
   type ForgeObservation,
   flattenObserved,
+  hostStackError,
   type ObservedState,
 } from './observed.js';
 import type { ClassifiedRunner } from './ownership.js';
@@ -154,6 +155,9 @@ describe('flattenObserved, a forge that shares one entity', () => {
     forge: 'gl-chevro',
     forgeRunnerId: '48',
     systemId: 's_aaaaaaaaaaaa',
+    installDir: null,
+    workDir: null,
+    stack: 'docker',
     name: 'grove-chevro-dind-1',
     createdAt: 1,
     retiredAt: null,
@@ -173,5 +177,89 @@ describe('flattenObserved, a forge that shares one entity', () => {
       { skipUnreachable: true },
     );
     expect(seen).toEqual([]);
+  });
+});
+
+describe('flattenObserved, native units', () => {
+  const unit = {
+    name: 'grove-ios-1',
+    unit: 'com.cestoliv.grove.ios-1',
+    state: 'running' as const,
+    pid: 4242,
+    detail: 'pid 4242',
+  };
+
+  it('gives a native unit a sighting on its host, like a container', () => {
+    const seen = flattenObserved(
+      {
+        hosts: [
+          {
+            host: 'mac',
+            reachable: true,
+            containers: [],
+            natives: [unit],
+            workRoots: {},
+          },
+        ],
+        forges: [],
+      },
+      { skipUnreachable: true },
+    );
+    expect(seen).toEqual([{ name: 'grove-ios-1', host: 'mac', native: unit }]);
+  });
+
+  it('drops a native unit on a host that did not answer', () => {
+    const seen = flattenObserved(
+      {
+        hosts: [
+          {
+            host: 'mac',
+            reachable: false,
+            reason: 'ssh timed out',
+            containers: [],
+            natives: [unit],
+            workRoots: {},
+          },
+        ],
+        forges: [],
+      },
+      { skipUnreachable: true },
+    );
+    expect(seen).toEqual([]);
+  });
+});
+
+describe('hostStackError', () => {
+  const observation = {
+    host: 'mac',
+    reachable: true,
+    containers: [],
+    workRoots: {},
+    containersError: 'mac: docker ps failed: command not found',
+  };
+
+  it('answers for the stack that was asked about', () => {
+    expect(hostStackError(observation, 'docker')).toBe(
+      'mac: docker ps failed: command not found',
+    );
+    expect(hostStackError(observation, 'native')).toBeUndefined();
+  });
+});
+
+describe('describeWhere, native units', () => {
+  it('names the unit as the place grove saw the runner', () => {
+    expect(
+      describeWhere({
+        name: 'grove-ios-1',
+        host: 'mac',
+        native: {
+          name: 'grove-ios-1',
+          unit: 'com.cestoliv.grove.ios-1',
+          state: 'stopped',
+          detail: 'last exit 0',
+        },
+        ownership: 'unmanaged',
+      }),
+    ).toBe('unit on mac');
   });
 });

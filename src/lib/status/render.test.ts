@@ -10,8 +10,9 @@ function row(overrides: Partial<StatusRow> = {}): StatusRow {
     group: 'overload-arm',
     host: 'mac',
     runner: 'grove-overload-arm-1',
-    container: 'running',
-    containerStatus: 'Up 3 hours',
+    stack: 'docker',
+    process: 'running',
+    detail: 'Up 3 hours',
     forge: 'gh-overload',
     forgeStatus: 'online',
     ownership: 'managed',
@@ -115,8 +116,9 @@ describe('renderStatusReport, managers', () => {
             group: 'chevro-dind',
             host: 'atlas',
             runner: 'grove-chevro-dind-1',
-            container: 'running',
-            containerStatus: 'Up 2 hours',
+            stack: 'docker',
+            process: 'running',
+            detail: 'Up 2 hours',
             forge: 'gl-chevro',
             forgeStatus: 'online',
             managerStatus: 'online',
@@ -141,8 +143,9 @@ describe('renderStatusReport, managers', () => {
             group: 'overload-arm',
             host: 'mac',
             runner: 'grove-overload-arm-1',
-            container: 'running',
-            containerStatus: 'Up 1 hour',
+            stack: 'docker',
+            process: 'running',
+            detail: 'Up 1 hour',
             forge: 'gh-overload',
             forgeStatus: 'online',
             ownership: 'managed',
@@ -177,5 +180,38 @@ describe('renderStatusReport, managers', () => {
     expect(text).toContain('Shared runners');
     expect(text).toContain('docker,dind');
     expect(text).toContain('2/3');
+  });
+});
+
+describe('renderStatusReport, the stack column', () => {
+  it('prints a stack for every row', () => {
+    const text = renderStatusReport(
+      {
+        configPath: '/work/grove.yaml',
+        rows: [
+          {
+            group: 'ios',
+            host: 'mac',
+            runner: 'grove-ios-1',
+            stack: 'native',
+            process: 'running',
+            detail: 'pid 4242',
+            forge: 'gh-overload',
+            forgeStatus: 'online',
+            ownership: 'managed',
+          },
+        ],
+        sharedRunners: [],
+        unreachableHosts: [],
+        unreachableForges: [],
+        ok: true,
+      },
+      { color: false },
+    );
+
+    expect(text).toContain('GROUP  HOST  RUNNER       STACK   PROCESS  DETAIL');
+    expect(text).toContain(
+      'ios    mac   grove-ios-1  native  running  pid 4242',
+    );
   });
 });

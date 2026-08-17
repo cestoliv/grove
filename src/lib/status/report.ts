@@ -1,4 +1,4 @@
-import type { LoadedConfig } from '../config/index.js';
+import type { LoadedConfig, StackKind } from '../config/index.js';
 import {
   classifyRunners,
   flattenObserved,
@@ -12,8 +12,14 @@ export interface StatusRow {
   group: string;
   host: string;
   runner: string;
-  container: string;
-  containerStatus: string;
+  // Which stack runs this seat. A record with nothing behind it takes the
+  // stack its group declares, because that is what grove would create.
+  stack: StackKind;
+  // What the host runs: a container state, or a native unit state, or
+  // `missing` when the host has neither.
+  process: string;
+  // What the host said about it, for example `Up 3 hours` or `pid 4242`.
+  detail: string;
   forge: string;
   forgeStatus: 'online' | 'offline' | 'busy' | 'unknown';
   // Set for a runner whose forge runs one entity with many managers, and only
@@ -59,6 +65,10 @@ export function buildStatusReport(
     records,
   });
 
+  const stackByGroup = new Map(
+    loaded.config.groups.map((group) => [group.name, group.stack]),
+  );
+
   const rows: StatusRow[] = [];
   for (const entry of classifyRunners(seen, records)) {
     if (entry.ownership === 'foreign') {
@@ -73,12 +83,22 @@ export function buildStatusReport(
     // The expansion attaches exactly the manager that belongs to this
     // runner, and nothing when grove cannot yet prove which one that is.
     const manager = entry.forgeRunner?.managers?.[0];
+    const group = entry.group ?? entry.record?.group ?? '-';
     rows.push({
-      group: entry.group ?? entry.record?.group ?? '-',
+      group,
       host: entry.host ?? entry.record?.host ?? '-',
       runner: entry.name,
-      container: entry.container?.state ?? 'missing',
-      containerStatus: entry.container?.status ?? '',
+      // A sighting names its own stack. A record with nothing behind it
+      // remembers the stack it was created on, and a record grove has never
+      // seen falls back to what the group declares today.
+      stack:
+        entry.native !== undefined
+          ? 'native'
+          : entry.container !== undefined
+            ? 'docker'
+            : (entry.record?.stack ?? stackByGroup.get(group) ?? 'docker'),
+      process: entry.native?.state ?? entry.container?.state ?? 'missing',
+      detail: entry.native?.detail ?? entry.container?.status ?? '',
       forge: entry.forge ?? entry.record?.forge ?? '-',
       forgeStatus,
       ...(manager === undefined
@@ -141,10 +161,10 @@ export function livenessFor(row: StatusRow): LivenessState {
   if (row.forgeStatus === 'busy') {
     return 'busy';
   }
-  if (row.container === 'missing') {
+  if (row.process === 'missing') {
     return 'missing';
   }
-  return row.container === 'running' && row.forgeStatus === 'online'
+  return row.process === 'running' && row.forgeStatus === 'online'
     ? 'online'
     : 'offline';
 }

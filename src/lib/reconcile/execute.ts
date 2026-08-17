@@ -4,12 +4,26 @@ import type { ForgeClient, RunnerRegistration } from '../forge/index.js';
 import { parseManagedName, sharedRunnerName } from '../naming.js';
 import {
   buildGitlabRunnerSpec,
+  buildNativeRunnerSpec,
+  buildNativeTarget,
   buildRunnerDirs,
   buildRunnerSpec,
+  createRunnerVersionResolver,
   type DockerStack,
+  NativeStack,
+  type NativeTarget,
+  nativeTargetFromDirs,
+  type RunnerVersionResolver,
+  rawNativeOptions,
 } from '../stack/index.js';
 import type { RunnerRecord, StateStore } from '../state/index.js';
-import { type Action, describeAction, isReport } from './actions.js';
+import type { Transport } from '../transport/index.js';
+import {
+  type Action,
+  actionStack,
+  describeAction,
+  isReport,
+} from './actions.js';
 import { createLimiter, type Limiter } from './limiter.js';
 import type { HostObservation, ObservedState } from './observed.js';
 import { groupForgeKey } from './shared.js';
@@ -20,10 +34,18 @@ export interface ExecuteOptions {
   config: GroveConfig;
   hosts: ReadonlyMap<string, HostObservation>;
   stacks: ReadonlyMap<string, DockerStack>;
+  // A native seat needs the platform and the uid, which only the observation
+  // knows, so its stack is built here rather than handed in ready made.
+  transports?: ReadonlyMap<string, Transport>;
   forgeClients: ReadonlyMap<string, ForgeClient>;
   store: StateStore;
   log?: (line: string) => void;
   forgeConcurrency?: number;
+  // One lookup of the latest actions/runner release per run, shared by every
+  // native seat this pass creates.
+  resolveRunnerVersion?: RunnerVersionResolver;
+  // How often grove asks launchd whether a draining job has gone.
+  nativePollIntervalMs?: number;
   // Wipe the work dir before starting an existing container.
   clean?: boolean;
   // Skip the drain wait.
@@ -46,6 +68,8 @@ interface Runtime extends ExecuteOptions {
   // One mint per group and forge, even when the group's seats sit on two
   // hosts and therefore run in two parallel buckets.
   sharedRegistrations: Map<string, Promise<RunnerRegistration>>;
+  natives: Map<string, NativeStack>;
+  runnerVersion: RunnerVersionResolver;
 }
 
 function groupFor(config: GroveConfig, name: string): GroupConfig {
@@ -70,6 +94,192 @@ function clientFor(runtime: Runtime, forge: string): ForgeClient {
     throw new Error(`no client was built for forge "${forge}"`);
   }
   return client;
+}
+
+function nativeFor(runtime: Runtime, host: string): NativeStack {
+  const cached = runtime.natives.get(host);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const transport = runtime.transports?.get(host);
+  if (transport === undefined) {
+    throw new Error(
+      `no transport was opened for host "${host}", so grove cannot drive a native runner there`,
+    );
+  }
+  const observation = runtime.hosts.get(host);
+  if (observation === undefined) {
+    throw new Error(
+      `host "${host}" was not observed on this pass, so grove cannot drive a native runner there`,
+    );
+  }
+  const stack = new NativeStack({
+    transport,
+    host,
+    platform: observation.platform ?? 'Linux',
+    ...(observation.uid === undefined ? {} : { uid: observation.uid }),
+    ...(runtime.nativePollIntervalMs === undefined
+      ? {}
+      : { pollIntervalMs: runtime.nativePollIntervalMs }),
+  });
+  runtime.natives.set(host, stack);
+  return stack;
+}
+
+// The plist and the unit file live under the runner user's home, and neither
+// transport expands a tilde inside a quoted path, so a host whose home grove
+// never read cannot hold a native seat.
+function homeFor(runtime: Runtime, host: string): string {
+  const home = runtime.hosts.get(host)?.home;
+  if (home === undefined) {
+    throw new Error(
+      `grove could not read $HOME on host "${host}", so it cannot place a native runner there`,
+    );
+  }
+  // A relative home would put the plist under whatever directory the SSH
+  // session happens to start in, and `mkdir -p Library/LaunchAgents` would
+  // create it there.
+  if (!home.startsWith('/')) {
+    throw new Error(
+      `$HOME on host "${host}" is "${home}", which is not an absolute path, so grove cannot place a native runner there`,
+    );
+  }
+  return home;
+}
+
+// The row a stop or a remove reads its directories from. A teardown carries the
+// row id and may have retired the row already, so the id is asked first and the
+// name only answers for an action that carries none.
+function recordFor(
+  runtime: Runtime,
+  action: { name: string; recordId?: number },
+): RunnerRecord | undefined {
+  const byId =
+    action.recordId === undefined
+      ? undefined
+      : runtime.store.getRunner(action.recordId);
+  return byId ?? runtime.store.findActiveByName(action.name);
+}
+
+// The config says where a seat's files are while its group is still declared.
+// Once the group has gone, only the record does.
+function nativeTargetFor(
+  runtime: Runtime,
+  action: { host: string; name: string; recordId?: number },
+): NativeTarget {
+  const { host, name } = action;
+  const parsed = parseManagedName(name);
+  if (parsed === null) {
+    throw new Error(`"${name}" is not a name grove derives from a group`);
+  }
+  const home = homeFor(runtime, host);
+  const group = runtime.config.groups.find(
+    (entry) => entry.name === parsed.group,
+  );
+  if (group !== undefined) {
+    const hostConfig = runtime.config.hosts[host];
+    if (hostConfig === undefined) {
+      throw new Error(
+        `host "${host}" is no longer in the config, so grove cannot derive the directories of "${name}"`,
+      );
+    }
+    return buildNativeTarget({
+      group,
+      host: hostConfig,
+      index: parsed.index,
+      home,
+    });
+  }
+  const record = recordFor(runtime, action);
+  if (
+    record === undefined ||
+    record.installDir === null ||
+    record.workDir === null
+  ) {
+    throw new Error(
+      `group "${parsed.group}" is no longer in the config and no record holds the directories of "${name}", so grove cannot find the native runner`,
+    );
+  }
+  return nativeTargetFromDirs({
+    name,
+    group: parsed.group,
+    index: parsed.index,
+    home,
+    installDir: record.installDir,
+    workDir: record.workDir,
+  });
+}
+
+async function createNativeRunner(
+  action: Extract<Action, { kind: 'create-runner' }>,
+  runtime: Runtime,
+): Promise<void> {
+  const group = groupFor(runtime.config, action.group);
+  const hostConfig = runtime.config.hosts[action.host];
+  const observation = runtime.hosts.get(action.host);
+  const home = homeFor(runtime, action.host);
+  const native = nativeFor(runtime, action.host);
+  const client = clientFor(runtime, action.forge);
+
+  // The version first, so a fleet that cannot reach api.github.com fails
+  // before it mints a registration token nobody will ever use.
+  const raw = rawNativeOptions(group.raw);
+  const version = raw.runnerVersion ?? (await runtime.runnerVersion());
+
+  const registration = await runtime.limiter(() =>
+    client.createRegistration({
+      scope: group.scope,
+      group: group.name,
+      name: action.name,
+      labels: group.labels ?? [],
+    }),
+  );
+
+  const spec = buildNativeRunnerSpec({
+    group,
+    host: hostConfig,
+    index: action.index,
+    home,
+    registration,
+    platform: observation?.platform ?? 'Linux',
+    ...(observation?.arch === undefined ? {} : { hostArch: observation.arch }),
+    version,
+  });
+
+  // A create wipes both, so the seat starts from a known runner and a known
+  // work dir. A restart wipes neither, so caches stay warm.
+  await native.prepareDirs(spec, { wipeWork: true, wipeInstall: true });
+
+  // config.sh is what creates the runner at GitHub, so the row lands first
+  // and grove never owns a runner it has no record for.
+  const record = resolveRecord(action, registration, runtime);
+  // Written beside the row, and before config.sh, so a seat whose group is
+  // later deleted from the config can still be found and taken down.
+  runtime.store.setRunnerDirs(record.id, {
+    installDir: spec.installDir,
+    workDir: spec.workDir,
+  });
+
+  await native.install(spec);
+  await native.create(spec);
+
+  runtime.store.recordEvent(record.id, 'created');
+  runtime.store.recordEvent(record.id, 'started');
+}
+
+async function startNativeRunner(
+  action: Extract<Action, { kind: 'start-container' }>,
+  runtime: Runtime,
+): Promise<void> {
+  const native = nativeFor(runtime, action.host);
+  const target = nativeTargetFor(runtime, action);
+  if (runtime.clean === true) {
+    await native.prepareDirs(target, { wipeWork: true, wipeInstall: false });
+  }
+  await native.start(target);
+  if (action.recordId !== undefined) {
+    runtime.store.recordEvent(action.recordId, 'started');
+  }
 }
 
 async function mintSharedRegistration(
@@ -193,6 +403,10 @@ async function createRunner(
     // token this create resolved, instead of reusing a stale config.toml.
     await stack.prepareConfigDir(spec, { wipe: true });
     const record = resolveRecord(action, registration, runtime);
+    runtime.store.setRunnerDirs(record.id, {
+      installDir: null,
+      workDir: spec.workDir,
+    });
     await stack.createGitlabRunner(spec);
     runtime.store.recordEvent(record.id, 'created');
     runtime.store.recordEvent(record.id, 'started');
@@ -227,6 +441,11 @@ async function createRunner(
   // runner it has no row for. A record that vanished between plan and apply
   // fails the action here, rather than starting an unrecorded container.
   const record = resolveRecord(action, registration, runtime);
+  // A container unpacks nothing on the host, so it has no install dir.
+  runtime.store.setRunnerDirs(record.id, {
+    installDir: null,
+    workDir: spec.workDir,
+  });
 
   await stack.create(spec);
 
@@ -247,6 +466,9 @@ function resolveRecord(
       forge: action.forge,
       name: action.name,
       forgeRunnerId: registration.runnerId ?? null,
+      // The action already says which stack builds this seat, and the record
+      // is what remembers it after the config has moved on.
+      stack: actionStack(action),
     });
   }
   const existing = runtime.store.getRunner(action.recordId);
@@ -283,23 +505,39 @@ async function startContainer(
 }
 
 async function runAction(action: Action, runtime: Runtime): Promise<void> {
+  const stack = actionStack(action);
   switch (action.kind) {
     case 'create-runner':
-      return createRunner(action, runtime);
+      return stack === 'native'
+        ? createNativeRunner(action, runtime)
+        : createRunner(action, runtime);
     case 'start-container':
-      return startContainer(action, runtime);
+      return stack === 'native'
+        ? startNativeRunner(action, runtime)
+        : startContainer(action, runtime);
     case 'stop-container': {
-      await stackFor(runtime, action.host).stop(
-        action.name,
-        runtime.force === true ? 0 : action.drainTimeoutMs,
-      );
+      const drainTimeoutMs = runtime.force === true ? 0 : action.drainTimeoutMs;
+      if (stack === 'native') {
+        await nativeFor(runtime, action.host).stop(
+          nativeTargetFor(runtime, action),
+          drainTimeoutMs,
+        );
+      } else {
+        await stackFor(runtime, action.host).stop(action.name, drainTimeoutMs);
+      }
       if (action.recordId !== undefined) {
         runtime.store.recordEvent(action.recordId, 'stopped');
       }
       return;
     }
     case 'remove-container': {
-      await stackFor(runtime, action.host).remove(action.name);
+      if (stack === 'native') {
+        await nativeFor(runtime, action.host).remove(
+          nativeTargetFor(runtime, action),
+        );
+      } else {
+        await stackFor(runtime, action.host).remove(action.name);
+      }
       if (action.recordId !== undefined) {
         runtime.store.recordEvent(action.recordId, 'removed');
       }
@@ -345,6 +583,9 @@ export async function executeActions(
     ...options,
     limiter: createLimiter(options.forgeConcurrency ?? FORGE_CONCURRENCY),
     sharedRegistrations: new Map(),
+    natives: new Map(),
+    runnerVersion:
+      options.resolveRunnerVersion ?? createRunnerVersionResolver(),
   };
   const log = options.log ?? (() => undefined);
 

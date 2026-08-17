@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { GroupConfig, GroveConfig } from './schema.js';
-import { archWarnings, privilegedSocketWarnings } from './warnings.js';
+import {
+  archWarnings,
+  nativeOptionWarnings,
+  privilegedSocketWarnings,
+} from './warnings.js';
 
 function buildConfig(...groups: Partial<GroupConfig>[]): GroveConfig {
   return {
@@ -173,5 +177,57 @@ describe('archWarnings', () => {
     );
     expect(warnings).toHaveLength(1);
     expect(warnings[0].message).toContain('host "atlas"');
+  });
+});
+
+describe('nativeOptionWarnings', () => {
+  function native(overrides: Record<string, unknown> = {}): GroveConfig {
+    return {
+      tick: { fast: 120_000, full: 1_800_000 },
+      hosts: { mac: { type: 'local' } },
+      forges: { 'gh-overload': { kind: 'github' } },
+      groups: [
+        {
+          name: 'ios',
+          forge: 'gh-overload',
+          scope: { level: 'organization', target: 'Overload-coach' },
+          placement: { mac: 1 },
+          stack: 'native',
+          ...overrides,
+        },
+      ],
+    } as unknown as GroveConfig;
+  }
+
+  it('names every Docker-only key a native group set', () => {
+    const warnings = nativeOptionWarnings(
+      native({ image: 'ubuntu:24.04', privileged: true }),
+    );
+    expect(warnings.map((warning) => warning.path)).toEqual([
+      'groups[0].image',
+      'groups[0].privileged',
+    ]);
+    expect(warnings[0].code).toBe('native-unused-option');
+    expect(warnings[0].message).toContain('runs on the host itself');
+  });
+
+  it('says nothing about a native group that sets none of them', () => {
+    expect(
+      nativeOptionWarnings(native({ labels: ['macos'], max_work_size: 1024 })),
+    ).toEqual([]);
+  });
+
+  it('says nothing about a Docker group, whatever it sets', () => {
+    const config = native({ image: 'ubuntu:24.04' });
+    config.groups[0].stack = 'docker';
+    expect(nativeOptionWarnings(config)).toEqual([]);
+  });
+
+  it('keeps the privileged warning to the stack that has containers', () => {
+    const config = native({
+      privileged: true,
+      volumes: ['/var/run/docker.sock:/var/run/docker.sock'],
+    });
+    expect(privilegedSocketWarnings(config)).toEqual([]);
   });
 });

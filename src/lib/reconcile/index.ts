@@ -1,6 +1,7 @@
 export {
   ACTION_VERBS,
   type Action,
+  actionStack,
   describeAction,
   hasDestructive,
   isReport,
@@ -25,6 +26,7 @@ export {
   type ForgeObservation,
   flattenObserved,
   type HostObservation,
+  hostStackError,
   type ObservedForgeRunner,
   type ObservedState,
 } from './observed.js';

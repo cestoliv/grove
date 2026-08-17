@@ -6,11 +6,9 @@ grove is agentless. One control node holds the config and reaches every host ove
 
 ## Status
 
-Milestone 3 of six. grove manages GitHub and GitLab runners in Docker containers. `config`, `plan`, `apply`, `status`, `logs` and `teardown` work for both. Native launchd and systemd runners arrive in milestone 4, the daemon and stuck detection in milestone 5, and `doctor` and Prometheus metrics in milestone 6.
+Milestone 4 of six. grove manages GitHub and GitLab runners in Docker containers, and GitHub runners as processes on the host under launchd on macOS and systemd on Linux. `config`, `plan`, `apply`, `status`, `logs` and `teardown` work on every one of them. The daemon and stuck detection arrive in milestone 5, and `doctor` and Prometheus metrics in milestone 6.
 
-A group with `stack: native` is reported as skipped and left alone rather than failing the run.
-
-Switching a group that already runs to `native` is a different thing. grove skips the group, so it plans no new runner for it, and the Docker runners the group left behind are no longer wanted by any group. `plan` reports the group as skipped and reaps those runners in the same pass. That is the intent, but the two lines read as a contradiction, so expect it.
+Switching a group from `docker` to `native`, or back, takes two applies. The first drains the seat on the stack it runs on today, deregisters it and retires its record. The second creates it on the new stack. grove refuses to run one runner name on two supervisors at once, so it waits for the record to go before it makes the new seat.
 
 ## Install
 
@@ -18,7 +16,7 @@ Switching a group that already runs to `native` is a different thing. grove skip
 npm install -g @cestoliv/grove
 ```
 
-grove needs Node 22.13 or newer on the control node, because it stores its history with `node:sqlite`. It also needs the `ssh` binary for any host that is not the control node, and a Docker daemon on every host that runs a group.
+grove needs Node 22.13 or newer on the control node, because it stores its history with `node:sqlite`. It also needs the `ssh` binary for any host that is not the control node, and a Docker daemon on every host that runs a `stack: docker` group. A host that runs only native groups needs no Docker at all, and [What a native host needs](#what-a-native-host-needs) says what it needs instead.
 
 ## Configure
 
@@ -129,6 +127,56 @@ A container that has never run has no id to read. grove stores what it reads on 
 
 A manager whose container grove stopped stays listed at GitLab until it goes stale. grove leaves it alone and shows the count in the shared runner table of `grove status`, so `2/3` means one container is not calling home.
 
+### Native runners
+
+A native group runs the GitHub Actions runner as a process on the host, supervised by a launchd agent on macOS and a systemd user unit on Linux. It is what you want for an iOS build, because Xcode does not run in a Linux container and a macOS container is not a thing.
+
+```yaml
+  - name: ios
+    forge: gh-overload
+    scope: { level: organization, target: Overload-coach }
+    placement: { host: mac, count: 1 }
+    stack: native
+    labels: [macos, xcode]
+    work_root: ~/ci/ios
+    max_job_duration: 90m
+    max_work_size: 120G
+    raw:
+      runner_version: "2.328.0"
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+```
+
+Native supports GitHub forges only. A native group on a GitLab forge is a config error, named with its path and its fix, and grove refuses the run before it touches a host. The GitLab shape for a host-installed runner is a `gitlab-runner` binary with a shell executor, which is a different stack rather than a variant of this one.
+
+grove downloads the runner release itself. It asks `api.github.com` for the latest `actions/runner` release once per run, and `raw.runner_version` pins a version instead, which is what you want on a host that cannot reach GitHub's API or in a fleet you want reproducible. Every failure of that lookup names `raw.runner_version` as the fix. The runner is configured with `--disableupdate`, so it keeps the version grove installed rather than replacing itself behind grove's back.
+
+`image`, `build`, `privileged`, `volumes`, `pull_policy`, `concurrent` and `limit` describe a container, so a native group that sets one gets a warning naming the key. `labels`, `arch`, `drain_timeout` and `work_root` all reach the seat. `cache_root` names a directory grove creates and hands to nothing yet, and `max_job_duration` and `max_work_size` are carried on the seat for the daemon of milestone 5, which is what they do on a Docker seat too.
+
+grove writes a native seat's install directory and work directory onto its record when it creates the seat. That is what lets `apply` and `teardown` take the seat down after its group has left the config, when the file no longer says where its files are. `grove logs` still needs the group, because it derives the log path from the config rather than from the record, and it says so rather than guessing.
+
+#### What a native host needs
+
+grove never provisions a host. These are the things it will tell you about rather than fix.
+
+On macOS:
+
+- The Xcode command line tools, so `git`, `curl` and `tar` exist. `xcode-select -p` should print a developer directory.
+- Xcode itself for an iOS build, and `raw.env.DEVELOPER_DIR` when more than one version is installed.
+- Nothing else. launchd is always there, and grove installs the agent into the per-user domain with no `sudo`.
+
+On Linux:
+
+- A systemd user session that survives logout. Run `loginctl enable-linger` as the runner user once, or grove's `systemctl --user` calls fail and it says so with that command in the message.
+- `curl` and `tar`.
+- `journalctl`, if you want `grove logs` to read the unit's output.
+
+grove's agent carries `PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin`, because launchd hands an agent a minimal PATH and a job that cannot find `xcodebuild` or a Homebrew tool is the first thing a native runner gets wrong. Anything in `raw.env` is added to that, and a `PATH` there replaces it.
+
+#### One host, both stacks
+
+A host runs whichever stacks its groups ask for, and each is queried on its own. A Mac with no Docker keeps converging its native groups, and a Linux box with no systemd user session keeps converging its Docker groups. A host that answers at all is reachable, and whichever query failed degrades only the seats behind it, with `plan` naming the reason on each of those seats.
+
 ### Placement
 
 `placement` takes two forms. `{ host: mac, count: 2 }` targets one host. `{ mac: 2, atlas: 1 }` spans hosts in one group.
@@ -162,10 +210,10 @@ Groups grove would manage
   ios           gh-overload (github)  organization Overload-coach  native  -      mac x1     1
 
 Changes
-  skipped     ios  native runners arrive in milestone 4
   create      grove-overload-arm-2  on mac, registering at gh-overload
+  create      grove-ios-1  on mac, registering at gh-overload, native
 
-1 change(s) planned. grove plan changes nothing. Run grove apply to make them.
+2 change(s) planned. grove plan changes nothing. Run grove apply to make them.
 ```
 
 A converged fleet closes with `Every host answered. Nothing to change.` instead.
@@ -211,16 +259,17 @@ grove logs overload-arm
 grove logs grove-overload-arm-1 --follow --tail 500
 ```
 
-`grove status` prints one row per runner, joining what Docker reports with what the forge believes, and marks each row managed, unmanaged or record-only. It writes one liveness sample per managed runner into the history database on every run.
+`grove status` prints one row per runner, joining what Docker and the host supervisors report with what the forge believes, and marks each row managed, unmanaged or record-only. `STACK` says which supervisor answered for the row, `PROCESS` is the container state, the unit state or `missing`, and `DETAIL` is what that supervisor said about it. It writes one liveness sample per managed runner into the history database on every run.
 
 ```
 config  /work/grove.yaml
 
 Runners
-  GROUP         HOST  RUNNER                CONTAINER  DETAIL                    FORGE    OWNER
-  overload-arm  mac   grove-overload-arm-1  running    Up 3 hours                busy     managed
-  overload-arm  mac   grove-overload-arm-2  exited     Exited (0) 4 minutes ago  offline  managed
-  legacy        mac   grove-legacy-1        running    Up 2 days                 online   unmanaged
+  GROUP         HOST  RUNNER                STACK   PROCESS  DETAIL                    FORGE    OWNER
+  overload-arm  mac   grove-overload-arm-1  docker  running  Up 3 hours                busy     managed
+  overload-arm  mac   grove-overload-arm-2  docker  exited   Exited (0) 4 minutes ago  offline  managed
+  ios           mac   grove-ios-1           native  running  pid 4242                  online   managed
+  legacy        mac   grove-legacy-1        docker  running  Up 2 days                 online   unmanaged
 
 Every host and forge answered.
 ```
@@ -235,7 +284,7 @@ Shared runners
   gl-chevro  chevro-dind  48      docker,dind  2/3
 ```
 
-`grove logs` takes a group name or a runner name. A group with several runners prints each in turn with a header. `--follow` needs exactly one runner. `--tail` defaults to 200 lines.
+`grove logs` takes a group name or a runner name, and reads whichever stack that runner uses. A Docker seat goes to `docker logs`. A native seat on macOS goes to `tail` on the two files launchd redirects into, `<install_dir>/stdout.log` and `<install_dir>/stderr.log`. A native seat on Linux goes to `journalctl --user -u grove-<group>-<index>.service`, and grove points at the runner's own `_diag` directory when `journalctl` is not installed. A group with several runners prints each in turn with a header. `--follow` needs exactly one runner. `--tail` defaults to 200 lines.
 
 ## Teardown
 
@@ -255,6 +304,8 @@ grove teardown --include-unmanaged
 
 `--include-unmanaged` extends the run to containers and forge runners whose name matches `grove-<group>-<index>` but that grove has no record of. It is off by default, because a name collision is not consent. It never reaches a foreign name.
 
+On a native seat `--include-unmanaged` reads the install directory from the config, because an unmanaged seat has no record to read it from. grove removes `<work_root>/<group>-<index>-runner` and refuses any other path, so a foreign seat of the same name that lives somewhere else keeps its files. A seat whose group has also left the config has no directory in either place, and grove reports that it needs the record rather than guessing.
+
 On a GitLab forge it also reaches a runner entity described `grove-<group>` that no active record and no stored registration backs. An entity grove minted is not unmanaged, however few containers point at it, so a plain `teardown` still removes that one.
 
 An unreachable host or forge stops the teardown of the runners behind it, and grove reports each one instead.
@@ -272,14 +323,18 @@ Every managed artifact derives its name from the group and a one-based index.
 | Artifact | Name |
 |---|---|
 | Docker container | `grove-<group>-<index>` |
+| launchd label, native macOS | `com.cestoliv.grove.<group>-<index>` |
+| launchd plist, native macOS | `~/Library/LaunchAgents/com.cestoliv.grove.<group>-<index>.plist` |
+| systemd user unit, native Linux | `~/.config/systemd/user/grove-<group>-<index>.service` |
 | Runner name at the forge | `grove-<group>-<index>` |
 | Work dir | `<work_root>/<group>-<index>` |
 | Cache dir | `<cache_root>/<group>-<index>` |
 | Config dir, GitLab only | `<work_root>/<group>-<index>-config` |
+| Install dir, native only | `<work_root>/<group>-<index>-runner` |
 
 Indexes run from 1 to the group's total count across every host in the placement. A group spread over two hosts still numbers its seats once, so no name appears twice.
 
-The work root defaults to `/var/tmp/grove`, and the cache root defaults to a sibling of the work root, so `/Volumes/ci/grove` gives `/Volumes/ci/grove-cache`. Both are mounted into the container at the identical path, because a job that runs `docker` talks to the host daemon and the host daemon resolves every path against the host. grove creates both directories with mode `0777`, because the runner runs as an unprivileged user inside the container and the bind mount carries host ownership.
+The work root defaults to `/var/tmp/grove`, and the cache root defaults to a sibling of the work root, so `/Volumes/ci/grove` gives `/Volumes/ci/grove-cache`. Both are mounted into the container at the identical path, because a job that runs `docker` talks to the host daemon and the host daemon resolves every path against the host. For a Docker group grove creates both directories with mode `0777`, because the runner runs as an unprivileged user inside the container and the bind mount carries host ownership. A native group needs no such thing, because its runner is the host user itself, so those two directories take the host umask.
 
 A group on a GitHub forge with no `image:` and no `build:` runs `ghcr.io/actions/actions-runner:latest`, configured with `./config.sh --url ... --token ... --name ... --work ... --unattended --replace` and started with `./run.sh`. `--replace` lets a recreated runner take its own name back at the forge. There is no `--ephemeral`, so runners are persistent and their caches stay warm. The work directory is wiped when a runner is created and kept across restarts.
 
@@ -294,6 +349,22 @@ The runner container gets the host Docker socket, because the Docker executor st
 `concurrent` is a global key in `config.toml` with no flag and no environment variable, so grove writes it before `register` runs and lets `register` merge its own section underneath. `limit` becomes `--limit` on the runner itself. `pull_policy: missing` becomes `--docker-pull-policy if-not-present`, which is how gitlab-runner spells it. The work dir and the cache dir reach the job containers at the same host paths, so a job writes where the runner mounted. Tags are never passed to `register`, because the entity already carries them and the current flow ignores them there.
 
 Jobs that name no image get `alpine:latest`. Set `raw.job_image` to change that.
+
+A native group installs the runner itself. grove creates `<work_root>/<group>-<index>-runner` mode `0700`, downloads `actions-runner-<os>-<arch>-<version>.tar.gz` into it with `curl`, unpacks it with `tar`, then runs `./config.sh --url ... --token ... --name ... --work ... --unattended --replace --disableupdate [--labels a,b]` from that directory. The install dir is a sibling of the work dir, so `apply --clean` wipes the work dir and leaves the runner and its credentials in place. Creating a runner wipes both.
+
+The registration token sits in the argument vector of `config.sh` while it runs. Anyone who can read the process table on the host reads it until it expires, exactly as with the Docker stack.
+
+`.credentials` in the install dir holds the runner's private key after registration, which is why that directory is `0700`. Removing a native seat deletes the install dir, because the key dies with the forge record grove deletes beside it, and keeps the work dir, exactly as a removed container leaves its work dir behind.
+
+Both supervisors run `<install_dir>/bin/runsvc.sh`, which is the entry point the runner's own service templates name. It traps SIGTERM and sends the listener SIGINT, and SIGINT is the signal that means stop taking work, finish the job you hold, then exit. `run.sh` traps nothing, so a SIGTERM there kills the wrapper and leaves the listener running its job with no parent. The systemd unit carries `KillMode=process`, so only that entry point is signalled and not the job's own children. The plist sets `ProcessType=Interactive`, because launchd throttles the CPU and the I/O of a background job and a 40 minute Xcode build is exactly the workload that pays for it.
+
+The launchd plist carries `RunAtLoad` and no `KeepAlive`, and the systemd unit carries `Restart=no`. grove owns crash recovery on every stack, and its fast tick is what brings a dead runner back.
+
+Draining a native seat sends SIGTERM, through `launchctl bootout` on macOS and `systemctl --user stop` on Linux. The runner finishes the job it holds and exits. The timer belongs to the supervisor: the plist carries `ExitTimeOut` and the unit carries `TimeoutStopSec`, both from `drain_timeout`, and each supervisor escalates to SIGKILL there. grove never kills a process itself, because the pid a supervisor reports is the entry point rather than the listener, and killing it would orphan the job. On macOS grove polls `launchctl list` until the seat is gone, for up to five seconds past the drain, and reports a failure if it is still there. So nothing deletes an install directory under a live runner, and the next pass tries again.
+
+`--force` sets the drain to zero. On Linux grove asks systemd for SIGKILL and the unit goes at once. On macOS the plist's `ExitTimeOut` is still what launchd escalates at, and grove has no way to kill the job faster without orphaning the process the runner is holding, so a forced seat that is still running a job is reported as still stopping rather than killed.
+
+grove deregisters a native runner through the GitHub API, with the runner id it already holds, rather than running `config.sh remove`. That means one code path for every stack, and it works even when the host has gone.
 
 Containers run with `--restart no`. grove owns crash recovery, so nothing resurrects a runner behind its back.
 
@@ -318,6 +389,17 @@ For a Docker group on a GitLab forge it reads four.
       job_image: node:22
       register_args: ["--docker-network-mode", "host"]
 ```
+
+For a native group it reads two.
+
+```yaml
+    raw:
+      runner_version: "2.328.0"
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+```
+
+`runner_version` pins the `actions/runner` release. `env` becomes the agent's environment, on top of the PATH grove sets.
 
 `docker_run_args` is appended to `docker run` just before the image. `env` becomes `--env NAME=value` on the runner container. `job_image` is the image a job gets when it names none. `register_args` is appended to `gitlab-runner register`, last, so it wins. Any other key is reported as an unused warning and passed nowhere. A `raw` block of the wrong shape is a config error, and grove refuses the run before it touches a host.
 

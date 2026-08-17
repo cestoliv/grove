@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import type { StackKind } from '../config/index.js';
 import { migrate } from './migrations.js';
 
 export type RunnerEventKind =
@@ -23,6 +24,15 @@ export interface RunnerRecord {
   // Learned from the host once the container has started once. Null until
   // then, and null for every stack that has no manager concept.
   systemId: string | null;
+  // Where the seat keeps its files, written when it is created. A native seat
+  // has both, a container has only the work dir, and a record written before
+  // milestone 4 has neither. A teardown reads them when the group they came
+  // from has left the config.
+  installDir: string | null;
+  workDir: string | null;
+  // The supervisor this seat was created on. The config can name another one
+  // tomorrow, and the seat that is running today is still on this one.
+  stack: StackKind;
   name: string;
   createdAt: number;
   retiredAt: number | null;
@@ -48,6 +58,8 @@ export interface CreateRunnerInput {
   forge: string;
   name: string;
   forgeRunnerId?: string | null;
+  // Absent means Docker, which is what every caller before milestone 4 meant.
+  stack?: StackKind;
 }
 
 export interface GroupRegistrationRecord {
@@ -59,6 +71,11 @@ export interface GroupRegistrationRecord {
   token: string;
   createdAt: number;
   retiredAt: number | null;
+}
+
+export interface RunnerDirsInput {
+  installDir: string | null;
+  workDir: string | null;
 }
 
 export interface CreateGroupRegistrationInput {
@@ -88,6 +105,9 @@ function toRecord(row: Row): RunnerRecord {
     forge: String(row.forge),
     forgeRunnerId: text(row.forge_runner_id),
     systemId: text(row.system_id),
+    installDir: text(row.install_dir),
+    workDir: text(row.work_dir),
+    stack: String(row.stack) === 'native' ? 'native' : 'docker',
     name: String(row.name),
     createdAt: Number(row.created_at),
     retiredAt: row.retired_at === null ? null : Number(row.retired_at),
@@ -157,8 +177,8 @@ export class StateStore {
     const result = this.db
       .prepare(
         `INSERT INTO runners
-           (group_name, runner_index, host, forge, forge_runner_id, name, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (group_name, runner_index, host, forge, forge_runner_id, stack, name, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.group,
@@ -166,6 +186,7 @@ export class StateStore {
         input.host,
         input.forge,
         input.forgeRunnerId ?? null,
+        input.stack ?? 'docker',
         input.name,
         this.now(),
       );
@@ -203,6 +224,14 @@ export class StateStore {
     this.db
       .prepare('UPDATE runners SET forge_runner_id = ? WHERE id = ?')
       .run(forgeRunnerId, id);
+  }
+
+  // Both columns move together, because a record that knows one directory and
+  // not the other tells a later teardown half a story.
+  setRunnerDirs(id: number, dirs: RunnerDirsInput): void {
+    this.db
+      .prepare('UPDATE runners SET install_dir = ?, work_dir = ? WHERE id = ?')
+      .run(dirs.installDir, dirs.workDir, id);
   }
 
   setSystemId(id: number, systemId: string): void {

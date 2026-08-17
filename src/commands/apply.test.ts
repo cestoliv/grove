@@ -406,3 +406,60 @@ describe('runApply, a GitLab group', () => {
     expect(forge.registrations).toHaveLength(1);
   });
 });
+
+describe('runApply, a native group', () => {
+  const NATIVE_CONFIG = `
+hosts:
+  mac: { type: local, work_root: /srv/grove }
+
+forges:
+  gh-overload: { kind: github }
+
+groups:
+  - name: ios
+    forge: gh-overload
+    scope: { level: organization, target: Overload-coach }
+    placement: { host: mac, count: 1 }
+    stack: native
+    labels: [macos, xcode]
+    raw:
+      runner_version: "2.328.0"
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+`;
+
+  function nativeMac(): FakeTransport {
+    return new FakeTransport('mac')
+      .on('uname', { stdout: 'Darwin arm64\n' })
+      .on('sh -c printf', { stdout: '/Users/olivier' })
+      .on('id -u', { stdout: '501\n' })
+      .on('docker ps', { stdout: '' })
+      .on('launchctl list', { stdout: 'PID\tStatus\tLabel\n' });
+  }
+
+  it('installs the runner and loads the launchd agent end to end', async () => {
+    await write(NATIVE_CONFIG);
+    const transport = nativeMac();
+    const code = await runApply(options(transport, { yes: true }));
+
+    expect(code).toBe(EXIT_OK);
+    expect(store.activeRunners().map((record) => record.name)).toEqual([
+      'grove-ios-1',
+    ]);
+    expect(client.registrations).toHaveLength(1);
+    const lines = transport.commandLines();
+    expect(
+      lines.some((line) =>
+        line.includes('actions-runner-osx-arm64-2.328.0.tar.gz'),
+      ),
+    ).toBe(true);
+    expect(lines).toContain(
+      'launchctl bootstrap gui/501 /Users/olivier/Library/LaunchAgents/com.cestoliv.grove.ios-1.plist',
+    );
+    expect(
+      transport.writes.get(
+        '/Users/olivier/Library/LaunchAgents/com.cestoliv.grove.ios-1.plist',
+      ),
+    ).toContain('/Applications/Xcode.app/Contents/Developer');
+  });
+});

@@ -58,6 +58,15 @@ export function validateReferences(config: GroveConfig): ConfigIssue[] {
           message: `labels belong to GitHub. Forge "${group.forge}" is a GitLab forge, so use tags.`,
         });
       }
+      // gitlab-runner ships as a container and grove has no native install
+      // for it, so the seat would have nothing to run.
+      if (forge.kind === 'gitlab' && group.stack === 'native') {
+        issues.push({
+          path: `${base}.stack`,
+          message:
+            'native runners on a GitLab forge are not supported. Use stack: docker for this group.',
+        });
+      }
       if (forge.kind === 'gitlab' && /-\d+$/.test(group.name)) {
         issues.push({
           path: `${base}.name`,

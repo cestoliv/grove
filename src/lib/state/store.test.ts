@@ -54,10 +54,29 @@ describe('StateStore', () => {
       forge: 'gh-overload',
       forgeRunnerId: null,
       systemId: null,
+      installDir: null,
+      workDir: null,
+      stack: 'docker',
       name: 'grove-overload-arm-1',
       createdAt: 1_001,
       retiredAt: null,
     });
+  });
+
+  it('remembers the stack a seat was created on', () => {
+    const record = store.createRunner({
+      group: 'ios',
+      index: 1,
+      host: 'mac',
+      forge: 'gh-overload',
+      name: 'grove-ios-1',
+      stack: 'native',
+    });
+    expect(record.stack).toBe('native');
+    expect(store.getRunner(record.id)?.stack).toBe('native');
+    // Every caller from milestone 2 and 3 says nothing, and Docker is what
+    // those callers meant.
+    expect(store.getRunner(create())?.stack).toBe('docker');
   });
 
   it('finds an active record by name and stops finding it once retired', () => {
@@ -162,6 +181,37 @@ describe('StateStore, system ids', () => {
     store.setSystemId(id, 's_aaaaaaaaaaaa');
     store.setSystemId(id, 'r_bbbbbbbbbbbb');
     expect(store.getRunner(id)?.systemId).toBe('r_bbbbbbbbbbbb');
+  });
+});
+
+describe('StateStore, runner directories', () => {
+  it('starts with no directories and keeps the two a create prepared', () => {
+    const id = create();
+    expect(store.getRunner(id)?.installDir).toBeNull();
+    expect(store.getRunner(id)?.workDir).toBeNull();
+    store.setRunnerDirs(id, {
+      installDir: '/Volumes/ci/grove/overload-arm-1-runner',
+      workDir: '/Volumes/ci/grove/overload-arm-1',
+    });
+    expect(store.getRunner(id)?.installDir).toBe(
+      '/Volumes/ci/grove/overload-arm-1-runner',
+    );
+    expect(store.getRunner(id)?.workDir).toBe(
+      '/Volumes/ci/grove/overload-arm-1',
+    );
+  });
+
+  // A container unpacks nothing on the host, so the column stays empty for it.
+  it('takes a null install dir from a stack that installs nothing', () => {
+    const id = create();
+    store.setRunnerDirs(id, {
+      installDir: null,
+      workDir: '/Volumes/ci/grove/overload-arm-1',
+    });
+    expect(store.getRunner(id)?.installDir).toBeNull();
+    expect(store.getRunner(id)?.workDir).toBe(
+      '/Volumes/ci/grove/overload-arm-1',
+    );
   });
 });
 
@@ -274,7 +324,7 @@ describe('StateStore, on disk', () => {
     }
   });
 
-  it('migrates a milestone 2 database to version 2 without losing a runner', async () => {
+  it('migrates a milestone 2 database forward without losing a runner', async () => {
     dir = await mkdtemp(join(tmpdir(), 'grove-state-'));
     const path = join(dir, 'grove.db');
     const old = new DatabaseSync(path);
@@ -290,10 +340,12 @@ describe('StateStore, on disk', () => {
     const migrated = StateStore.open(path);
     try {
       expect(migrated.schemaVersion()).toBe(SCHEMA_VERSION);
-      expect(SCHEMA_VERSION).toBe(2);
+      expect(SCHEMA_VERSION).toBe(3);
       const [record] = migrated.activeRunners();
       expect(record.name).toBe('grove-overload-arm-1');
       expect(record.systemId).toBeNull();
+      expect(record.installDir).toBeNull();
+      expect(record.workDir).toBeNull();
       expect(migrated.activeGroupRegistrations()).toEqual([]);
     } finally {
       migrated.close();

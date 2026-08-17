@@ -1,5 +1,4 @@
 export {
-  DEFAULT_DRAIN_TIMEOUT_MS,
   DockerStack,
   type DockerStackOptions,
   type LogsOptions,
@@ -36,10 +35,64 @@ export {
   type RawGitlabOptions,
   rawGitlabOptions,
 } from './gitlab-args.js';
+export {
+  isDarwinPlatform,
+  LINGER_HINT,
+  type NativeLogsOptions,
+  NativeStack,
+  type NativeStackOptions,
+  NO_USER_BUS,
+  type PrepareNativeDirsOptions,
+  readUid,
+} from './native.js';
+export {
+  buildConfigArgs,
+  buildDownloadArgs,
+  buildExtractArgs,
+  buildNativeRunnerSpec,
+  buildNativeTarget,
+  NATIVE_PATH,
+  type NativeRunnerSpec,
+  type NativeRunnerSpecInput,
+  type NativeTarget,
+  type NativeTargetDirsInput,
+  type NativeTargetInput,
+  nativeTargetFromDirs,
+  RAW_NATIVE_KEYS,
+  type RawNativeOptions,
+  rawNativeOptions,
+} from './native-args.js';
+export {
+  createRunnerVersionResolver,
+  RUNNER_DOWNLOAD_BASE,
+  RUNNER_RELEASE_URL,
+  type RunnerArch,
+  type RunnerOs,
+  type RunnerVersionOptions,
+  type RunnerVersionResolver,
+  runnerArch,
+  runnerOs,
+  runnerTarballUrl,
+} from './native-release.js';
+export {
+  buildLaunchdPlist,
+  buildSystemdUnit,
+  escapeXml,
+  LAUNCHCTL_LIST_ARGS,
+  launchctlBootoutArgs,
+  launchctlBootstrapArgs,
+  launchctlKickstartArgs,
+  parseLaunchctlList,
+  parseSystemctlList,
+  SYSTEMCTL_LIST_ARGS,
+} from './native-units.js';
 export { rawStackWarnings } from './raw-warnings.js';
 export {
   type ContainerState,
+  DEFAULT_DRAIN_TIMEOUT_MS,
   type DockerContainer,
+  type NativeUnit,
+  type NativeUnitState,
   StackError,
 } from './types.js';
 export {

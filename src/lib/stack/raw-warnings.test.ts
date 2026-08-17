@@ -72,10 +72,57 @@ describe('rawStackWarnings', () => {
       ),
     ).toThrow(ConfigError);
   });
+});
 
-  it('says nothing about a native group, which has no Docker raw block', () => {
-    expect(
-      rawStackWarnings(config([{ stack: 'native', raw: { anything: 1 } }])),
-    ).toEqual([]);
+function configWith(overrides: Record<string, unknown>): GroveConfig {
+  return {
+    tick: { fast: 120_000, full: 1_800_000 },
+    hosts: { mac: { type: 'local' } },
+    forges: { 'gh-overload': { kind: 'github' } },
+    groups: [
+      {
+        name: 'ios',
+        forge: 'gh-overload',
+        scope: { level: 'organization', target: 'Overload-coach' },
+        placement: { mac: 1 },
+        stack: 'docker',
+        ...overrides,
+      },
+    ],
+  } as unknown as GroveConfig;
+}
+
+describe('rawStackWarnings, native groups', () => {
+  it('reads env and runner_version and warns about everything else', () => {
+    const warnings = rawStackWarnings(
+      configWith({
+        stack: 'native',
+        raw: {
+          env: { DEVELOPER_DIR: '/Applications/Xcode.app/Contents/Developer' },
+          runner_version: '2.328.0',
+          docker_run_args: ['--dns', '1.1.1.1'],
+        },
+      }),
+    );
+    expect(warnings).toEqual([
+      {
+        code: 'raw-unused',
+        path: 'groups[0].raw.docker_run_args',
+        message:
+          'this stack reads env and runner_version from raw, and passes nothing else through. grove proceeds anyway.',
+      },
+    ]);
+  });
+
+  it('turns a malformed native raw block into a config error', () => {
+    expect(() =>
+      rawStackWarnings(
+        configWith({ stack: 'native', raw: { runner_version: 2 } }),
+      ),
+    ).toThrow('groups[0].raw.runner_version');
+  });
+
+  it('says nothing about a native group with no raw block', () => {
+    expect(rawStackWarnings(configWith({ stack: 'native' }))).toEqual([]);
   });
 });

@@ -33,6 +33,9 @@ function record(name: string, id = 1): RunnerRecord {
     forge: 'gh-overload',
     forgeRunnerId: null,
     systemId: null,
+    installDir: null,
+    workDir: null,
+    stack: 'docker',
     name,
     createdAt: 0,
     retiredAt: null,
@@ -89,8 +92,9 @@ describe('buildStatusReport', () => {
         group: 'overload-arm',
         host: 'mac',
         runner: 'grove-overload-arm-1',
-        container: 'running',
-        containerStatus: 'Up 3 hours',
+        stack: 'docker',
+        process: 'running',
+        detail: 'Up 3 hours',
         forge: 'gh-overload',
         forgeStatus: 'busy',
         ownership: 'managed',
@@ -108,7 +112,7 @@ describe('buildStatusReport', () => {
       record('grove-overload-arm-1'),
     ]);
     expect(report.rows[0]).toMatchObject({
-      container: 'missing',
+      process: 'missing',
       forgeStatus: 'unknown',
       ownership: 'record-only',
     });
@@ -150,10 +154,10 @@ describe('buildStatusReport', () => {
       ['mac', 'managed'],
     ]);
     expect(report.rows[0]).toMatchObject({
-      container: 'exited',
+      process: 'exited',
       recordId: undefined,
     });
-    expect(report.rows[1]).toMatchObject({ container: 'running', recordId: 1 });
+    expect(report.rows[1]).toMatchObject({ process: 'running', recordId: 1 });
   });
 
   it('reports unreachable hosts and forges and is not ok', () => {
@@ -186,10 +190,10 @@ describe('livenessFor', () => {
     expect(livenessFor(rows[0])).toBe('busy');
     expect(livenessFor({ ...rows[0], forgeStatus: 'online' })).toBe('online');
     expect(
-      livenessFor({ ...rows[0], container: 'missing', forgeStatus: 'unknown' }),
+      livenessFor({ ...rows[0], process: 'missing', forgeStatus: 'unknown' }),
     ).toBe('missing');
     expect(
-      livenessFor({ ...rows[0], container: 'exited', forgeStatus: 'offline' }),
+      livenessFor({ ...rows[0], process: 'exited', forgeStatus: 'offline' }),
     ).toBe('offline');
   });
 });
@@ -226,6 +230,9 @@ describe('buildStatusReport, a GitLab group', () => {
       forge: 'gl-chevro',
       forgeRunnerId: '48',
       systemId,
+      installDir: null,
+      workDir: null,
+      stack: 'docker',
       name: `grove-chevro-dind-${index}`,
       createdAt: 0,
       retiredAt: null,
@@ -311,5 +318,98 @@ describe('buildStatusReport, a GitLab group', () => {
       [],
     );
     expect(githubReport.sharedRunners).toEqual([]);
+  });
+});
+
+describe('buildStatusReport, native seats', () => {
+  const unit = {
+    name: 'grove-ios-1',
+    unit: 'com.cestoliv.grove.ios-1',
+    state: 'running' as const,
+    pid: 4242,
+    detail: 'pid 4242',
+  };
+
+  // The loaded() helper at the top of this file declares one Docker group, so
+  // a native fleet gets its own.
+  function nativeLoaded(): LoadedConfig {
+    const config: GroveConfig = {
+      tick: { fast: 120_000, full: 1_800_000 },
+      hosts: { mac: { type: 'local' } },
+      forges: { 'gh-overload': { kind: 'github' } },
+      groups: [
+        {
+          name: 'ios',
+          forge: 'gh-overload',
+          scope: SCOPE,
+          placement: { mac: 1 },
+          stack: 'native',
+        },
+      ],
+    } as GroveConfig;
+    return { path: '/work/grove.yaml', config, warnings: [] };
+  }
+
+  it('names the stack, the process state and what the host said', () => {
+    const report = buildStatusReport(
+      nativeLoaded(),
+      {
+        hosts: [
+          {
+            host: 'mac',
+            reachable: true,
+            containers: [],
+            natives: [unit],
+            workRoots: {},
+          },
+        ],
+        forges: [{ forge: 'gh-overload', reachable: true, runners: [] }],
+      },
+      [],
+    );
+
+    expect(report.rows[0]).toMatchObject({
+      group: 'ios',
+      runner: 'grove-ios-1',
+      stack: 'native',
+      process: 'running',
+      detail: 'pid 4242',
+      ownership: 'unmanaged',
+    });
+  });
+
+  it('calls a Docker seat docker, and a record with nothing behind it missing', () => {
+    const report = buildStatusReport(
+      loaded(),
+      {
+        hosts: [
+          { host: 'mac', reachable: true, containers: [], workRoots: {} },
+        ],
+        forges: [{ forge: 'gh-overload', reachable: true, runners: [] }],
+      },
+      [
+        {
+          id: 1,
+          group: 'overload-arm',
+          index: 1,
+          host: 'mac',
+          forge: 'gh-overload',
+          forgeRunnerId: null,
+          systemId: null,
+          installDir: null,
+          workDir: null,
+          stack: 'docker',
+          name: 'grove-overload-arm-1',
+          createdAt: 0,
+          retiredAt: null,
+        },
+      ],
+    );
+
+    expect(report.rows[0]).toMatchObject({
+      stack: 'docker',
+      process: 'missing',
+      detail: '',
+    });
   });
 });

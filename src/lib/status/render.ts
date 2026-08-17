@@ -2,7 +2,7 @@ import pc from 'picocolors';
 import { renderTable } from '../plan/render.js';
 import type { StatusReport } from './report.js';
 
-const FORGE_COLUMN = 5;
+const FORGE_COLUMN = 6;
 
 export interface StatusRenderOptions {
   color?: boolean;
@@ -27,8 +27,9 @@ export function renderStatusReport(
       row.group,
       row.host,
       row.runner,
-      row.container,
-      row.containerStatus,
+      row.stack,
+      row.process,
+      row.detail,
       row.forgeStatus,
       ...(showManagers ? [row.managerStatus ?? '-'] : []),
       row.ownership,
@@ -38,7 +39,8 @@ export function renderStatusReport(
         'GROUP',
         'HOST',
         'RUNNER',
-        'CONTAINER',
+        'STACK',
+        'PROCESS',
         'DETAIL',
         'FORGE',
         ...(showManagers ? ['MANAGER'] : []),

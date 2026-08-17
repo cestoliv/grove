@@ -102,3 +102,63 @@ export function resolveCacheRoot(host: HostConfig, group: GroupConfig): string {
     `${trimTrailingSlash(resolveWorkRoot(host, group))}-cache`
   );
 }
+
+// The launchd label the spec fixes for a managed runner, and the daemon of
+// milestone 5 sits under the same prefix with the fixed suffix "daemon".
+export const LAUNCHD_LABEL_PREFIX = 'com.cestoliv.grove.';
+export const SYSTEMD_UNIT_SUFFIX = '.service';
+export const LAUNCH_AGENTS_DIR = 'Library/LaunchAgents';
+export const SYSTEMD_USER_DIR = '.config/systemd/user';
+
+export function launchdLabel(group: string, index: number): string {
+  return `${LAUNCHD_LABEL_PREFIX}${group}-${index}`;
+}
+
+export function systemdUnit(group: string, index: number): string {
+  return `${runnerName(group, index)}${SYSTEMD_UNIT_SUFFIX}`;
+}
+
+export function launchdPlistPath(
+  home: string,
+  group: string,
+  index: number,
+): string {
+  return `${trimTrailingSlash(home)}/${LAUNCH_AGENTS_DIR}/${launchdLabel(group, index)}.plist`;
+}
+
+export function systemdUnitPath(
+  home: string,
+  group: string,
+  index: number,
+): string {
+  return `${trimTrailingSlash(home)}/${SYSTEMD_USER_DIR}/${systemdUnit(group, index)}`;
+}
+
+// The unpacked runner release, its credentials and its own logs. A sibling of
+// the work dir, so `apply --clean` wipes the caches and leaves the install.
+export function runnerInstallDir(
+  root: string,
+  group: string,
+  index: number,
+): string {
+  return `${runnerDir(root, group, index)}-runner`;
+}
+
+// A label or a unit name grove would recognise as one of its seats. Anything
+// that does not parse as a managed runner name answers null, which is what
+// keeps the daemon and every foreign job out of the observation.
+export function runnerNameFromLaunchdLabel(label: string): string | null {
+  if (!label.startsWith(LAUNCHD_LABEL_PREFIX)) {
+    return null;
+  }
+  const name = `${GROVE_PREFIX}${label.slice(LAUNCHD_LABEL_PREFIX.length)}`;
+  return parseManagedName(name) === null ? null : name;
+}
+
+export function runnerNameFromSystemdUnit(unit: string): string | null {
+  if (!unit.endsWith(SYSTEMD_UNIT_SUFFIX)) {
+    return null;
+  }
+  const name = unit.slice(0, -SYSTEMD_UNIT_SUFFIX.length);
+  return parseManagedName(name) === null ? null : name;
+}

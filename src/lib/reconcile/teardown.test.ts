@@ -46,6 +46,9 @@ function record(name: string, id = 1): RunnerRecord {
     forge: 'gh-overload',
     forgeRunnerId: null,
     systemId: null,
+    installDir: null,
+    workDir: null,
+    stack: 'docker',
     name,
     createdAt: 0,
     retiredAt: null,
@@ -482,6 +485,9 @@ describe('planTeardown, a GitLab group', () => {
       forge: 'gl-chevro',
       forgeRunnerId: '48',
       systemId,
+      installDir: null,
+      workDir: null,
+      stack: 'docker',
       name: `grove-chevro-dind-${index}`,
       createdAt: 0,
       retiredAt: null,
@@ -764,5 +770,298 @@ describe('planTeardown, a GitLab group', () => {
     expect(
       actions.some((action) => action.kind === 'delete-shared-runner'),
     ).toBe(false);
+  });
+});
+
+describe('planTeardown, native seats', () => {
+  const unit = {
+    name: 'grove-ios-1',
+    unit: 'com.cestoliv.grove.ios-1',
+    state: 'running' as const,
+    pid: 4242,
+    detail: 'pid 4242',
+  };
+
+  function iosRecord(): RunnerRecord {
+    return {
+      id: 1,
+      group: 'ios',
+      index: 1,
+      host: 'mac',
+      forge: 'gh-overload',
+      forgeRunnerId: '7',
+      systemId: null,
+      installDir: null,
+      workDir: null,
+      stack: 'native',
+      name: 'grove-ios-1',
+      createdAt: 0,
+      retiredAt: null,
+    };
+  }
+
+  // The observed() helper at the top of this file builds containers from a
+  // list of names, so a native fleet gets its own builder here.
+  function nativeObserved(
+    hostOverrides: Record<string, unknown> = {},
+    listed = true,
+  ): ObservedState {
+    return {
+      hosts: [
+        {
+          host: 'mac',
+          reachable: true,
+          containers: [],
+          natives: [unit],
+          workRoots: {},
+          ...hostOverrides,
+        },
+      ],
+      forges: [
+        {
+          forge: 'gh-overload',
+          reachable: true,
+          runners: listed
+            ? [
+                {
+                  runner: {
+                    id: '7',
+                    name: 'grove-ios-1',
+                    status: 'online' as const,
+                    busy: false,
+                    labels: ['macos'],
+                  },
+                  scope: SCOPE,
+                },
+              ]
+            : [],
+        },
+      ],
+    } as ObservedState;
+  }
+
+  it('drains, deregisters, removes and retires a native seat', () => {
+    const actions = planTeardown(config(), nativeObserved(), [iosRecord()]);
+
+    expect(actions).toEqual([
+      {
+        kind: 'stop-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        recordId: 1,
+        drainTimeoutMs: 120_000,
+        destructive: true,
+      },
+      {
+        kind: 'deregister-runner',
+        host: 'mac',
+        forge: 'gh-overload',
+        scope: SCOPE,
+        name: 'grove-ios-1',
+        forgeRunnerId: '7',
+        recordId: 1,
+        destructive: true,
+      },
+      {
+        kind: 'remove-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        recordId: 1,
+        destructive: true,
+      },
+      {
+        kind: 'retire-record',
+        host: 'mac',
+        name: 'grove-ios-1',
+        recordId: 1,
+        destructive: true,
+      },
+    ]);
+  });
+
+  it('leaves a seat alone when its own supervisor did not answer', () => {
+    const actions = planTeardown(
+      config(),
+      nativeObserved({ nativesError: 'mac: launchctl list failed: exit 1' }),
+      [iosRecord()],
+    );
+
+    expect(actions.map((action) => action.kind)).toEqual(['report-degraded']);
+    expect(actions[0]).toMatchObject({
+      target: 'grove-ios-1',
+      reason: 'mac: launchctl list failed: exit 1',
+    });
+  });
+
+  it('removes a native seat on a host that has no Docker', () => {
+    const actions = planTeardown(
+      config(),
+      nativeObserved({ containersError: 'mac: docker ps failed: not found' }),
+      [iosRecord()],
+    );
+
+    expect(kinds(actions)).toEqual([
+      'stop-container',
+      'deregister-runner',
+      'remove-container',
+      'retire-record',
+    ]);
+  });
+
+  // The record names the supervisor that held the seat, and that is the one
+  // whose silence counts. Nothing else on the host can speak for it.
+  it('retires a native record whose unit is gone', () => {
+    const actions = planTeardown(
+      config(),
+      nativeObserved({
+        natives: [],
+        containersError: 'mac: docker ps failed: not found',
+      }),
+      [iosRecord()],
+    );
+
+    expect(kinds(actions)).toEqual(['deregister-runner', 'retire-record']);
+  });
+
+  it('leaves a native record with no unit alone when launchctl went blind', () => {
+    const actions = planTeardown(
+      config(),
+      nativeObserved({
+        natives: [],
+        nativesError: 'mac: launchctl list failed: exit 1',
+      }),
+      [iosRecord()],
+    );
+
+    expect(kinds(actions)).toEqual(['report-degraded']);
+    expect(actions[0]).toMatchObject({
+      target: 'grove-ios-1',
+      reason: 'mac: launchctl list failed: exit 1',
+    });
+  });
+
+  it('reports a native record with nothing behind it', () => {
+    const actions = planTeardown(
+      config(),
+      nativeObserved({ natives: [] }, false),
+      [iosRecord()],
+    );
+
+    expect(kinds(actions)).toEqual(['report-orphan-record']);
+  });
+
+  it('leaves a native record with nothing behind it alone when launchctl went blind', () => {
+    const actions = planTeardown(
+      config(),
+      nativeObserved(
+        { natives: [], nativesError: 'mac: launchctl list failed: exit 1' },
+        false,
+      ),
+      [iosRecord()],
+    );
+
+    expect(kinds(actions)).toEqual(['report-degraded']);
+    expect(actions[0]).toMatchObject({
+      target: 'grove-ios-1',
+      host: 'mac',
+      reason: 'mac: launchctl list failed: exit 1',
+    });
+  });
+
+  // A Docker record must not be held back by a supervisor it never used. On a
+  // Linux host with no user bus every pass carries a nativesError.
+  it('retires a Docker record whose container is gone while launchctl is blind', () => {
+    const state = forgeOnly(['grove-overload-arm-1']);
+    state.hosts[0] = {
+      ...state.hosts[0],
+      natives: [],
+      nativesError: 'mac: systemctl --user list-units failed: exit 1',
+    } as (typeof state.hosts)[0];
+
+    const actions = planTeardown(config(), state, [
+      record('grove-overload-arm-1'),
+    ]);
+
+    expect(kinds(actions)).toEqual(['deregister-runner', 'retire-record']);
+  });
+
+  it('leaves an unmanaged native unit alone by default', () => {
+    const actions = planTeardown(config(), nativeObserved({}, false), []);
+
+    expect(actions).toEqual([
+      {
+        kind: 'report-unmanaged',
+        name: 'grove-ios-1',
+        where: 'unit on mac',
+        host: 'mac',
+        destructive: false,
+      },
+    ]);
+  });
+
+  it('removes an unmanaged native unit when the operator asks for it', () => {
+    const actions = planTeardown(config(), nativeObserved({}, false), [], {
+      includeUnmanaged: true,
+    });
+
+    expect(actions).toEqual([
+      {
+        kind: 'stop-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        drainTimeoutMs: 120_000,
+        destructive: true,
+      },
+      {
+        kind: 'remove-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        destructive: true,
+      },
+    ]);
+  });
+
+  // A container and a unit of one name on one host are two seats. The record
+  // names the supervisor that holds its own, and the other one is not grove's.
+  it('tears down the seat its record names and reports the other stack', () => {
+    const state = nativeObserved();
+    state.hosts[0] = {
+      ...state.hosts[0],
+      containers: [container('grove-ios-1')],
+    };
+
+    const actions = planTeardown(config(), state, [iosRecord()]);
+
+    expect(kinds(actions)).toEqual([
+      'stop-container',
+      'deregister-runner',
+      'remove-container',
+      'retire-record',
+      'report-unmanaged',
+    ]);
+    expect(actions[0]).toMatchObject({ stack: 'native' });
+    expect(actions[4]).toMatchObject({
+      name: 'grove-ios-1',
+      where: 'container on mac',
+    });
+  });
+
+  it('reports a Docker record with nothing behind it while launchctl is blind', () => {
+    const state = observed([]);
+    state.hosts[0] = {
+      ...state.hosts[0],
+      natives: [],
+      nativesError: 'mac: systemctl --user list-units failed: exit 1',
+    } as (typeof state.hosts)[0];
+
+    const actions = planTeardown(config(), state, [
+      record('grove-overload-arm-1'),
+    ]);
+
+    expect(kinds(actions)).toEqual(['report-orphan-record']);
   });
 });

@@ -1,4 +1,4 @@
-import type { Scope } from '../config/index.js';
+import type { Scope, StackKind } from '../config/index.js';
 
 export interface CreateRunnerAction {
   kind: 'create-runner';
@@ -7,6 +7,9 @@ export interface CreateRunnerAction {
   group: string;
   index: number;
   name: string;
+  // Absent means docker, the only stack milestone 2 and 3 knew about. Read it
+  // through actionStack rather than here, so the default lives in one place.
+  stack?: StackKind;
   // Set when a record already exists and only the container is missing.
   recordId?: number;
   // The forge runner id the planner judged gone. Set when the group holds a
@@ -23,6 +26,7 @@ export interface StartContainerAction {
   kind: 'start-container';
   host: string;
   name: string;
+  stack?: StackKind;
   recordId?: number;
   destructive: false;
 }
@@ -31,6 +35,7 @@ export interface StopContainerAction {
   kind: 'stop-container';
   host: string;
   name: string;
+  stack?: StackKind;
   recordId?: number;
   drainTimeoutMs: number;
   destructive: true;
@@ -40,6 +45,7 @@ export interface RemoveContainerAction {
   kind: 'remove-container';
   host: string;
   name: string;
+  stack?: StackKind;
   recordId?: number;
   destructive: true;
 }
@@ -147,6 +153,12 @@ function line(kind: Action['kind'], subject: string, detail: string): string {
   return `${ACTION_VERBS[kind].padEnd(VERB_WIDTH)}  ${subject}  ${detail}`;
 }
 
+// Nothing is appended for Docker, so every line milestone 2 and 3 printed is
+// the line grove still prints.
+function stackSuffix(action: Action): string {
+  return actionStack(action) === 'docker' ? '' : `, ${actionStack(action)}`;
+}
+
 export function describeAction(action: Action): string {
   switch (action.kind) {
     case 'create-runner':
@@ -156,18 +168,27 @@ export function describeAction(action: Action): string {
         `on ${action.host}, registering at ${action.forge}` +
           (action.renewRegistration === undefined
             ? ''
-            : ', renewing the group registration'),
+            : ', renewing the group registration') +
+          stackSuffix(action),
       );
     case 'start-container':
-      return line(action.kind, action.name, `on ${action.host}`);
+      return line(
+        action.kind,
+        action.name,
+        `on ${action.host}${stackSuffix(action)}`,
+      );
     case 'stop-container':
       return line(
         action.kind,
         action.name,
-        `on ${action.host}, up to ${Math.round(action.drainTimeoutMs / 1000)}s`,
+        `on ${action.host}, up to ${Math.round(action.drainTimeoutMs / 1000)}s${stackSuffix(action)}`,
       );
     case 'remove-container':
-      return line(action.kind, action.name, `on ${action.host}`);
+      return line(
+        action.kind,
+        action.name,
+        `on ${action.host}${stackSuffix(action)}`,
+      );
     case 'deregister-runner':
       return line(
         action.kind,
@@ -199,4 +220,15 @@ export function hasDestructive(actions: Action[]): boolean {
 
 export function isReport(action: Action): boolean {
   return action.kind.startsWith('report-');
+}
+
+/**
+ * Which stack does the work an action describes. An action that names none is
+ * a Docker action, because that is the only stack that existed when the kinds
+ * were named, and renaming them would buy nothing.
+ */
+export function actionStack(action: Action): StackKind {
+  return 'stack' in action && action.stack !== undefined
+    ? action.stack
+    : 'docker';
 }

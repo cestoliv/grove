@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GroveConfig } from '../config/index.js';
-import type { DockerContainer } from '../stack/index.js';
+import type { DockerContainer, NativeUnit } from '../stack/index.js';
 import type { GroupRegistrationRecord, RunnerRecord } from '../state/index.js';
 import type { Action } from './actions.js';
 import type {
@@ -62,6 +62,19 @@ function container(
   };
 }
 
+function unit(
+  name: string,
+  state: NativeUnit['state'] = 'running',
+): NativeUnit {
+  return {
+    name,
+    unit: `com.cestoliv.grove.${name.slice('grove-'.length)}`,
+    state,
+    detail: state === 'running' ? 'pid 4242' : 'last exit 0',
+    ...(state === 'running' ? { pid: 4242 } : {}),
+  };
+}
+
 function record(
   name: string,
   overrides: Partial<RunnerRecord> = {},
@@ -75,6 +88,9 @@ function record(
     forge: 'gh-overload',
     forgeRunnerId: null,
     systemId: null,
+    installDir: null,
+    workDir: null,
+    stack: 'docker',
     name,
     createdAt: 0,
     retiredAt: null,
@@ -493,7 +509,7 @@ describe('reconcile, guards and unsupported stacks', () => {
     expect(actions[0]).toMatchObject({ target: 'grove-overload-arm-1' });
   });
 
-  it('skips a native group without failing the run', () => {
+  it('skips a native group on a GitLab forge without failing the run', () => {
     const desired = config({
       forges: {
         'gh-overload': { kind: 'github' },
@@ -502,8 +518,8 @@ describe('reconcile, guards and unsupported stacks', () => {
       groups: [
         {
           name: 'ios',
-          forge: 'gh-overload',
-          scope: SCOPE,
+          forge: 'gl-chevro',
+          scope: { level: 'instance' },
           placement: { mac: 1 },
           stack: 'native',
         },
@@ -512,6 +528,9 @@ describe('reconcile, guards and unsupported stacks', () => {
     const actions = reconcile(desired, observed(), []);
     expect(kinds(actions)).toEqual(['report-unsupported']);
     expect(actions[0]).toMatchObject({ group: 'ios' });
+    expect(actions[0]).toMatchObject({
+      reason: expect.stringContaining('no milestone plans one'),
+    });
   });
 });
 
@@ -1152,5 +1171,399 @@ describe('reconcile, a GitLab group', () => {
       actions.some((action) => action.kind === 'delete-shared-runner'),
     ).toBe(false);
     expect(kinds(actions)).toContain('report-unmanaged');
+  });
+});
+
+describe('reconcile, native seats', () => {
+  const nativeGroup = {
+    name: 'ios',
+    forge: 'gh-overload',
+    scope: SCOPE,
+    placement: { mac: 1 },
+    stack: 'native',
+  };
+
+  function nativeConfig(): GroveConfig {
+    return config({ groups: [nativeGroup] } as Partial<GroveConfig>);
+  }
+
+  function nativeRecord(): RunnerRecord {
+    return {
+      ...record('grove-ios-1'),
+      group: 'ios',
+      index: 1,
+      id: 1,
+      stack: 'native',
+    };
+  }
+
+  it('creates a native seat and says which stack will do it', () => {
+    const actions = reconcile(nativeConfig(), observed(), []);
+    expect(actions).toEqual([
+      {
+        kind: 'create-runner',
+        host: 'mac',
+        forge: 'gh-overload',
+        group: 'ios',
+        index: 1,
+        name: 'grove-ios-1',
+        stack: 'native',
+        destructive: false,
+      },
+    ]);
+  });
+
+  it('starts a native seat the supervisor loaded but is not running', () => {
+    const actions = reconcile(
+      nativeConfig(),
+      observed({
+        hosts: [host({ natives: [unit('grove-ios-1', 'stopped')] })],
+      }),
+      [nativeRecord()],
+    );
+    expect(actions).toEqual([
+      {
+        kind: 'start-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        recordId: 1,
+        destructive: false,
+      },
+    ]);
+  });
+
+  it('leaves a running native seat alone', () => {
+    expect(
+      reconcile(
+        nativeConfig(),
+        observed({ hosts: [host({ natives: [unit('grove-ios-1')] })] }),
+        [nativeRecord()],
+      ),
+    ).toEqual([]);
+  });
+
+  it('drains and removes a native seat the config no longer wants', () => {
+    const actions = reconcile(
+      config({ groups: [] } as Partial<GroveConfig>),
+      observed({ hosts: [host({ natives: [unit('grove-ios-1')] })] }),
+      [nativeRecord()],
+    );
+    expect(actions).toEqual([
+      {
+        kind: 'stop-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        recordId: 1,
+        drainTimeoutMs: 120_000,
+        destructive: true,
+      },
+      {
+        kind: 'remove-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        recordId: 1,
+        destructive: true,
+      },
+      {
+        kind: 'retire-record',
+        host: 'mac',
+        name: 'grove-ios-1',
+        recordId: 1,
+        destructive: true,
+      },
+    ]);
+  });
+
+  it('reports a native unit no record backs, and adopts nothing', () => {
+    const actions = reconcile(
+      config({ groups: [] } as Partial<GroveConfig>),
+      observed({ hosts: [host({ natives: [unit('grove-ios-1')] })] }),
+      [],
+    );
+    expect(actions).toEqual([
+      {
+        kind: 'report-unmanaged',
+        name: 'grove-ios-1',
+        where: 'unit on mac',
+        host: 'mac',
+        destructive: false,
+      },
+    ]);
+  });
+});
+
+describe('reconcile, a stack that could not be queried', () => {
+  it('degrades a Docker seat and converges the native one beside it', () => {
+    const desired = config({
+      groups: [
+        {
+          name: 'overload-arm',
+          forge: 'gh-overload',
+          scope: SCOPE,
+          placement: { mac: 1 },
+          stack: 'docker',
+        },
+        {
+          name: 'ios',
+          forge: 'gh-overload',
+          scope: SCOPE,
+          placement: { mac: 1 },
+          stack: 'native',
+        },
+      ],
+    } as Partial<GroveConfig>);
+    const actions = reconcile(
+      desired,
+      observed({
+        hosts: [
+          host({
+            containersError: 'mac: docker ps failed: command not found',
+          }),
+        ],
+      }),
+      [],
+    );
+    expect(kinds(actions)).toEqual(['report-degraded', 'create-runner']);
+    expect(actions[0]).toMatchObject({
+      target: 'grove-overload-arm-1',
+      reason: 'mac: docker ps failed: command not found',
+    });
+    expect(actions[1]).toMatchObject({ name: 'grove-ios-1', stack: 'native' });
+  });
+
+  it('leaves a record alone while the supervisor it names is blind', () => {
+    const actions = reconcile(
+      config({ groups: [] } as Partial<GroveConfig>),
+      observed({
+        hosts: [
+          host({
+            nativesError: 'mac: launchctl list failed: exit 1',
+          }),
+        ],
+      }),
+      [{ ...record('grove-ios-1'), group: 'ios', stack: 'native' }],
+    );
+    expect(kinds(actions)).toEqual(['report-degraded']);
+    expect(actions[0]).toMatchObject({
+      target: 'grove-ios-1',
+      reason: 'mac: launchctl list failed: exit 1',
+    });
+  });
+
+  it('retires a Docker record the fleet dropped while only launchctl is blind', () => {
+    const actions = reconcile(
+      config({ groups: [] } as Partial<GroveConfig>),
+      observed({
+        hosts: [host({ nativesError: 'mac: launchctl list failed: exit 1' })],
+      }),
+      [record('grove-overload-arm-1')],
+    );
+    expect(kinds(actions)).toEqual(['report-orphan-record', 'retire-record']);
+  });
+
+  it('retires a surplus Docker seat while only launchctl is blind', () => {
+    const desired = config({
+      groups: [
+        {
+          name: 'overload-arm',
+          forge: 'gh-overload',
+          scope: SCOPE,
+          placement: { mac: 1 },
+          stack: 'docker',
+        },
+      ],
+    } as Partial<GroveConfig>);
+    const actions = reconcile(
+      desired,
+      observed({
+        hosts: [
+          host({
+            containers: [container('grove-overload-arm-1')],
+            nativesError: 'mac: launchctl list failed: exit 1',
+          }),
+        ],
+      }),
+      [record('grove-overload-arm-1'), record('grove-overload-arm-2')],
+    );
+    expect(kinds(actions)).toEqual(['report-orphan-record', 'retire-record']);
+    expect(actions[1]).toMatchObject({ name: 'grove-overload-arm-2' });
+  });
+});
+
+describe('reconcile, a group that switches stack', () => {
+  function group(stack: 'docker' | 'native'): Partial<GroveConfig> {
+    return {
+      groups: [
+        {
+          name: 'ios',
+          forge: 'gh-overload',
+          scope: SCOPE,
+          placement: { mac: 1 },
+          stack,
+        },
+      ],
+    } as Partial<GroveConfig>;
+  }
+
+  const dockerRecord: RunnerRecord = {
+    ...record('grove-ios-1'),
+    group: 'ios',
+    stack: 'docker',
+  };
+  const nativeRecord: RunnerRecord = { ...dockerRecord, stack: 'native' };
+
+  it('drains the container the group left behind and creates nothing yet', () => {
+    const actions = reconcile(
+      config(group('native')),
+      observed({ hosts: [host({ containers: [container('grove-ios-1')] })] }),
+      [dockerRecord],
+    );
+    expect(actions).toEqual([
+      {
+        kind: 'stop-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        recordId: 1,
+        drainTimeoutMs: 120_000,
+        destructive: true,
+      },
+      {
+        kind: 'remove-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        recordId: 1,
+        destructive: true,
+      },
+      {
+        kind: 'retire-record',
+        host: 'mac',
+        name: 'grove-ios-1',
+        recordId: 1,
+        destructive: true,
+      },
+    ]);
+  });
+
+  it('creates the native seat once the Docker record is retired', () => {
+    const actions = reconcile(config(group('native')), observed(), []);
+    expect(actions).toEqual([
+      {
+        kind: 'create-runner',
+        host: 'mac',
+        forge: 'gh-overload',
+        group: 'ios',
+        index: 1,
+        name: 'grove-ios-1',
+        stack: 'native',
+        destructive: false,
+      },
+    ]);
+  });
+
+  it('drains the unit the group left behind when it switches back to Docker', () => {
+    const actions = reconcile(
+      config(group('docker')),
+      observed({ hosts: [host({ natives: [unit('grove-ios-1')] })] }),
+      [nativeRecord],
+    );
+    expect(actions).toEqual([
+      {
+        kind: 'stop-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        recordId: 1,
+        drainTimeoutMs: 120_000,
+        destructive: true,
+      },
+      {
+        kind: 'remove-container',
+        host: 'mac',
+        name: 'grove-ios-1',
+        stack: 'native',
+        recordId: 1,
+        destructive: true,
+      },
+      {
+        kind: 'retire-record',
+        host: 'mac',
+        name: 'grove-ios-1',
+        recordId: 1,
+        destructive: true,
+      },
+    ]);
+  });
+
+  it('creates the Docker seat once the native record is retired', () => {
+    const actions = reconcile(config(group('docker')), observed(), []);
+    expect(actions).toEqual([
+      {
+        kind: 'create-runner',
+        host: 'mac',
+        forge: 'gh-overload',
+        group: 'ios',
+        index: 1,
+        name: 'grove-ios-1',
+        destructive: false,
+      },
+    ]);
+  });
+});
+
+describe('reconcile, one name on two supervisors', () => {
+  function oneSeat(stack: 'docker' | 'native'): GroveConfig {
+    return config({
+      groups: [
+        {
+          name: 'ios',
+          forge: 'gh-overload',
+          scope: SCOPE,
+          placement: { mac: 1 },
+          stack,
+        },
+      ],
+    } as Partial<GroveConfig>);
+  }
+
+  const collision = observed({
+    hosts: [
+      host({
+        containers: [container('grove-ios-1')],
+        natives: [unit('grove-ios-1')],
+      }),
+    ],
+  });
+
+  it('claims the container its Docker record names and reports the unit', () => {
+    const actions = reconcile(oneSeat('docker'), collision, [
+      { ...record('grove-ios-1'), group: 'ios', stack: 'docker' },
+    ]);
+    expect(actions).toEqual([
+      {
+        kind: 'report-unmanaged',
+        name: 'grove-ios-1',
+        where: 'unit on mac',
+        host: 'mac',
+        destructive: false,
+      },
+    ]);
+  });
+
+  it('claims the unit its native record names and reports the container', () => {
+    const actions = reconcile(oneSeat('native'), collision, [
+      { ...record('grove-ios-1'), group: 'ios', stack: 'native' },
+    ]);
+    expect(actions).toEqual([
+      {
+        kind: 'report-unmanaged',
+        name: 'grove-ios-1',
+        where: 'container on mac',
+        host: 'mac',
+        destructive: false,
+      },
+    ]);
   });
 });

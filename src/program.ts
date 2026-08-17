@@ -104,7 +104,9 @@ export function buildProgram(): Command {
 
   program
     .command('logs')
-    .description('Read a group or a runner logs from Docker.')
+    .description(
+      'Read a group or a runner logs, from Docker or from the host supervisor.',
+    )
     .argument('<target>', 'A group name or a runner name')
     .option('-f, --follow', 'Stream new lines as they arrive')
     .option(

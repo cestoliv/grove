@@ -195,6 +195,11 @@ describe('executeActions, creating a runner', () => {
       group: 'overload-arm',
       index: 1,
       host: 'mac',
+      // A container unpacks nothing on the host, so only the work dir is
+      // worth remembering.
+      installDir: null,
+      workDir: '/Volumes/ci/grove/overload-arm-1',
+      stack: 'docker',
     });
     expect(store.eventsFor(record?.id ?? 0).map((event) => event.kind)).toEqual(
       ['created', 'started'],
@@ -968,5 +973,379 @@ describe('persistSystemIds', () => {
       store,
     );
     expect(learned).toBe(0);
+  });
+});
+
+describe('executeActions, a native seat', () => {
+  function nativeConfig(overrides: Record<string, unknown> = {}): GroveConfig {
+    return {
+      tick: { fast: 120_000, full: 1_800_000 },
+      hosts: { mac: { type: 'local', work_root: '/Volumes/ci/grove' } },
+      forges: { 'gh-overload': { kind: 'github' } },
+      groups: [
+        {
+          name: 'ios',
+          forge: 'gh-overload',
+          scope: SCOPE,
+          placement: { mac: 1 },
+          stack: 'native',
+          labels: ['macos'],
+          ...overrides,
+        },
+      ],
+    } as unknown as GroveConfig;
+  }
+
+  function nativeObservation(): HostObservation {
+    return {
+      host: 'mac',
+      reachable: true,
+      platform: 'Darwin',
+      arch: 'arm64',
+      home: '/Users/olivier',
+      uid: '501',
+      containers: [],
+      natives: [],
+      workRoots: {},
+    };
+  }
+
+  function nativeContext(
+    transport: FakeTransport,
+    client: FakeForgeClient,
+    extra: Record<string, unknown> = {},
+  ) {
+    return {
+      config: nativeConfig(),
+      hosts: new Map([['mac', nativeObservation()]]),
+      stacks: new Map([['mac', new DockerStack({ transport, host: 'mac' })]]),
+      transports: new Map<string, Transport>([['mac', transport]]),
+      forgeClients: new Map([['gh-overload', client]]),
+      store,
+      resolveRunnerVersion: async () => '2.328.0',
+      nativePollIntervalMs: 1,
+      log: () => undefined,
+      ...extra,
+    };
+  }
+
+  const nativeCreate: Action = {
+    kind: 'create-runner',
+    host: 'mac',
+    forge: 'gh-overload',
+    group: 'ios',
+    index: 1,
+    name: 'grove-ios-1',
+    stack: 'native',
+    destructive: false,
+  };
+
+  it('installs the runner, records it, then loads the launchd agent', async () => {
+    const transport = new FakeTransport('mac');
+    const client = new FakeForgeClient('gh-overload');
+    const result = await executeActions(
+      [nativeCreate],
+      nativeContext(transport, client),
+    );
+
+    expect(result.failed).toEqual([]);
+    const lines = transport.commandLines();
+    expect(lines[0]).toContain('sh -c rm -rf');
+    expect(lines[1]).toContain(
+      'curl -fsSL -o /Volumes/ci/grove/ios-1-runner/actions-runner.tar.gz',
+    );
+    expect(lines[2]).toContain('tar xzf');
+    expect(lines[4]).toContain('/Volumes/ci/grove/ios-1-runner/config.sh');
+    expect(lines).toContain(
+      'launchctl bootstrap gui/501 /Users/olivier/Library/LaunchAgents/com.cestoliv.grove.ios-1.plist',
+    );
+    expect(client.registrations).toHaveLength(1);
+    const record = store.findActiveByName('grove-ios-1');
+    expect(record?.host).toBe('mac');
+    // Both directories, because a teardown after the group left the config has
+    // nowhere else to read them from.
+    expect(record?.installDir).toBe('/Volumes/ci/grove/ios-1-runner');
+    expect(record?.workDir).toBe('/Volumes/ci/grove/ios-1');
+    // The record names the supervisor that holds this seat, so a config that
+    // switches stack later still knows where the running seat is.
+    expect(record?.stack).toBe('native');
+  });
+
+  it('writes the record before config.sh runs at the forge', async () => {
+    const transport = new FakeTransport('mac').fail(
+      '/Volumes/ci/grove/ios-1-runner/config.sh',
+      'Http response code: NotFound\n',
+      1,
+    );
+    const result = await executeActions(
+      [nativeCreate],
+      nativeContext(transport, new FakeForgeClient('gh-overload')),
+    );
+
+    expect(result.failed).toHaveLength(1);
+    // The row survives the failure on purpose. A runner config.sh half
+    // registered is a runner grove has to be able to find again.
+    expect(store.findActiveByName('grove-ios-1')).toBeDefined();
+    expect(store.findActiveByName('grove-ios-1')?.installDir).toBe(
+      '/Volumes/ci/grove/ios-1-runner',
+    );
+  });
+
+  it('uses the pinned version and asks GitHub nothing', async () => {
+    const transport = new FakeTransport('mac');
+    const result = await executeActions([nativeCreate], {
+      ...nativeContext(transport, new FakeForgeClient('gh-overload')),
+      config: nativeConfig({ raw: { runner_version: '2.327.1' } }),
+      resolveRunnerVersion: async () => {
+        throw new Error('grove asked GitHub for a version it was given');
+      },
+    });
+
+    expect(result.failed).toEqual([]);
+    expect(transport.commandLines()[1]).toContain(
+      'actions-runner-osx-arm64-2.327.1.tar.gz',
+    );
+  });
+
+  it('refuses to place a seat on a host whose home it never read', async () => {
+    const transport = new FakeTransport('mac');
+    const result = await executeActions([nativeCreate], {
+      ...nativeContext(transport, new FakeForgeClient('gh-overload')),
+      hosts: new Map([
+        ['mac', { ...nativeObservation(), home: undefined } as HostObservation],
+      ]),
+    });
+
+    expect(result.failed[0].error).toMatch(/\$HOME on host "mac"/);
+    expect(transport.calls).toEqual([]);
+  });
+
+  it('wipes the work dir and not the install dir on a clean start', async () => {
+    const transport = new FakeTransport('mac');
+    await executeActions(
+      [
+        {
+          kind: 'start-container',
+          host: 'mac',
+          name: 'grove-ios-1',
+          stack: 'native',
+          destructive: false,
+        },
+      ],
+      {
+        ...nativeContext(transport, new FakeForgeClient('gh-overload')),
+        clean: true,
+      },
+    );
+
+    expect(transport.calls[0].args[1]).toContain(
+      "rm -rf '/Volumes/ci/grove/ios-1'",
+    );
+    expect(transport.calls[0].args[1]).not.toContain(
+      "rm -rf '/Volumes/ci/grove/ios-1-runner'",
+    );
+    expect(transport.commandLines()).toContain(
+      'launchctl kickstart -k gui/501/com.cestoliv.grove.ios-1',
+    );
+  });
+
+  it('drains through the supervisor, under --force too, and kills nothing', async () => {
+    const drain: Action = {
+      kind: 'stop-container',
+      host: 'mac',
+      name: 'grove-ios-1',
+      stack: 'native',
+      drainTimeoutMs: 20,
+      destructive: true,
+    };
+    // launchd has let the job go, which is the answer the poll waits for.
+    const listing = { stdout: 'PID\tStatus\tLabel\n' };
+    const expected = [
+      'launchctl bootout gui/501/com.cestoliv.grove.ios-1',
+      'launchctl list',
+    ];
+
+    const patient = new FakeTransport('mac').on('launchctl list', listing);
+    const drained = await executeActions(
+      [drain],
+      nativeContext(patient, new FakeForgeClient('gh-overload')),
+    );
+    expect(drained.failed).toEqual([]);
+    expect(patient.commandLines()).toEqual(expected);
+
+    // grove never kills a pid launchctl named. That pid is the entry point,
+    // not the listener, so launchd's own escalation is what must do it.
+    const forced = new FakeTransport('mac').on('launchctl list', listing);
+    const forcedResult = await executeActions([drain], {
+      ...nativeContext(forced, new FakeForgeClient('gh-overload')),
+      force: true,
+    });
+    expect(forcedResult.failed).toEqual([]);
+    expect(forced.commandLines()).toEqual(expected);
+  });
+
+  it('removes the agent and the install dir', async () => {
+    const transport = new FakeTransport('mac');
+    await executeActions(
+      [
+        {
+          kind: 'remove-container',
+          host: 'mac',
+          name: 'grove-ios-1',
+          stack: 'native',
+          destructive: true,
+        },
+      ],
+      nativeContext(transport, new FakeForgeClient('gh-overload')),
+    );
+
+    expect(transport.commandLines()).toEqual([
+      'launchctl bootout gui/501/com.cestoliv.grove.ios-1',
+      'rm -f /Users/olivier/Library/LaunchAgents/com.cestoliv.grove.ios-1.plist',
+      'rm -rf /Volumes/ci/grove/ios-1-runner',
+    ]);
+  });
+
+  it('removes a seat whose group left the config, from the dirs it recorded', async () => {
+    const existing = store.createRunner({
+      group: 'ios',
+      index: 1,
+      host: 'mac',
+      forge: 'gh-overload',
+      name: 'grove-ios-1',
+    });
+    store.setRunnerDirs(existing.id, {
+      installDir: '/Volumes/ci/grove/ios-1-runner',
+      workDir: '/Volumes/ci/grove/ios-1',
+    });
+    const transport = new FakeTransport('mac');
+    const result = await executeActions(
+      [
+        {
+          kind: 'remove-container',
+          host: 'mac',
+          name: 'grove-ios-1',
+          stack: 'native',
+          recordId: existing.id,
+          destructive: true,
+        },
+      ],
+      {
+        ...nativeContext(transport, new FakeForgeClient('gh-overload')),
+        config: { ...nativeConfig(), groups: [] } as GroveConfig,
+      },
+    );
+
+    expect(result.failed).toEqual([]);
+    expect(transport.commandLines()).toEqual([
+      'launchctl bootout gui/501/com.cestoliv.grove.ios-1',
+      'rm -f /Users/olivier/Library/LaunchAgents/com.cestoliv.grove.ios-1.plist',
+      'rm -rf /Volumes/ci/grove/ios-1-runner',
+    ]);
+  });
+
+  it('reads the dirs off a record the teardown has already retired', async () => {
+    const existing = store.createRunner({
+      group: 'ios',
+      index: 1,
+      host: 'mac',
+      forge: 'gh-overload',
+      name: 'grove-ios-1',
+    });
+    store.setRunnerDirs(existing.id, {
+      installDir: '/Volumes/ci/grove/ios-1-runner',
+      workDir: '/Volumes/ci/grove/ios-1',
+    });
+    store.retireRunner(existing.id);
+    const transport = new FakeTransport('mac');
+    const result = await executeActions(
+      [
+        {
+          kind: 'remove-container',
+          host: 'mac',
+          name: 'grove-ios-1',
+          stack: 'native',
+          recordId: existing.id,
+          destructive: true,
+        },
+      ],
+      {
+        ...nativeContext(transport, new FakeForgeClient('gh-overload')),
+        config: { ...nativeConfig(), groups: [] } as GroveConfig,
+      },
+    );
+
+    expect(result.failed).toEqual([]);
+    expect(transport.commandLines()).toContain(
+      'rm -rf /Volumes/ci/grove/ios-1-runner',
+    );
+  });
+
+  it('says so when the group is gone and no record holds the directories', async () => {
+    const transport = new FakeTransport('mac');
+    const result = await executeActions(
+      [
+        {
+          kind: 'remove-container',
+          host: 'mac',
+          name: 'grove-ios-1',
+          stack: 'native',
+          destructive: true,
+        },
+      ],
+      {
+        ...nativeContext(transport, new FakeForgeClient('gh-overload')),
+        config: { ...nativeConfig(), groups: [] } as GroveConfig,
+      },
+    );
+
+    expect(result.failed[0].error).toMatch(
+      /no longer in the config.+no record holds the directories/,
+    );
+    expect(transport.calls).toEqual([]);
+  });
+
+  it('refuses a $HOME that is not an absolute path, naming the host', async () => {
+    const transport = new FakeTransport('mac');
+    const result = await executeActions([nativeCreate], {
+      ...nativeContext(transport, new FakeForgeClient('gh-overload')),
+      hosts: new Map([['mac', { ...nativeObservation(), home: 'Users/o' }]]),
+    });
+    expect(result.failed[0].error).toMatch(
+      /\$HOME on host "mac" is "Users\/o", which is not an absolute path/,
+    );
+    expect(transport.calls).toEqual([]);
+  });
+
+  it('says so when the host has left the config', async () => {
+    const transport = new FakeTransport('mac');
+    const result = await executeActions(
+      [
+        {
+          kind: 'remove-container',
+          host: 'mac',
+          name: 'grove-ios-1',
+          stack: 'native',
+          destructive: true,
+        },
+      ],
+      {
+        ...nativeContext(transport, new FakeForgeClient('gh-overload')),
+        config: { ...nativeConfig(), hosts: {} } as GroveConfig,
+      },
+    );
+    expect(result.failed[0].error).toMatch(
+      /host "mac" is no longer in the config/,
+    );
+    expect(transport.calls).toEqual([]);
+  });
+
+  it('says so when no transport was opened for the host', async () => {
+    const transport = new FakeTransport('mac');
+    const result = await executeActions([nativeCreate], {
+      ...nativeContext(transport, new FakeForgeClient('gh-overload')),
+      transports: new Map<string, Transport>(),
+    });
+    expect(result.failed[0].error).toMatch(/no transport was opened/);
   });
 });

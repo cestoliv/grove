@@ -1,14 +1,16 @@
-import type { GroveConfig, Scope } from '../config/index.js';
+import type { GroveConfig, Scope, StackKind } from '../config/index.js';
 import { runnerName } from '../naming.js';
 import {
   DEFAULT_DRAIN_TIMEOUT_MS,
   type DockerContainer,
+  type NativeUnit,
 } from '../stack/index.js';
 import type { GroupRegistrationRecord, RunnerRecord } from '../state/index.js';
 import type { Action } from './actions.js';
 import {
   describeWhere,
   flattenObserved,
+  hostStackError,
   type ObservedState,
 } from './observed.js';
 import { classifyRunners } from './ownership.js';
@@ -31,6 +33,7 @@ interface DesiredRunner {
   index: number;
   host: string;
   forge: string;
+  stack: StackKind;
 }
 
 interface ForgeSighting {
@@ -102,11 +105,15 @@ export function reconcile(
 
   const wanted = new Map<string, DesiredRunner>();
   for (const group of desired.groups) {
-    if (group.stack !== 'docker') {
+    if (
+      group.stack === 'native' &&
+      desired.forges[group.forge]?.kind === 'gitlab'
+    ) {
       unsupported.push({
         kind: 'report-unsupported',
         group: group.name,
-        reason: 'native runners arrive in milestone 4',
+        reason:
+          'a native runner on a GitLab forge is not supported, and no milestone plans one. Use stack: docker for this group, or move it to a GitHub forge.',
         destructive: false,
       });
       continue;
@@ -124,6 +131,7 @@ export function reconcile(
           index,
           host,
           forge: group.forge,
+          stack: group.stack,
         });
       }
     }
@@ -148,10 +156,14 @@ export function reconcile(
   });
 
   const containers = new Map<string, DockerContainer>();
+  const natives = new Map<string, NativeUnit>();
   const sightings = new Map<string, ForgeSighting>();
   for (const entry of observedRunners) {
     if (entry.container !== undefined && entry.host !== undefined) {
       containers.set(containerKey(entry.host, entry.name), entry.container);
+    }
+    if (entry.native !== undefined && entry.host !== undefined) {
+      natives.set(containerKey(entry.host, entry.name), entry.native);
     }
     if (
       entry.forgeRunner !== undefined &&
@@ -164,6 +176,32 @@ export function reconcile(
       });
     }
   }
+
+  // One seat on one host, read through the stack that owns it. A container
+  // and a unit of the same name on one host are two different seats, and
+  // asking with the stack is what keeps grove from confusing them.
+  const seatOn = (
+    host: string,
+    name: string,
+    stack: StackKind,
+  ): { running: boolean } | undefined => {
+    const key = containerKey(host, name);
+    if (stack === 'native') {
+      const unit = natives.get(key);
+      return unit === undefined
+        ? undefined
+        : { running: unit.state === 'running' };
+    }
+    const container = containers.get(key);
+    return container === undefined
+      ? undefined
+      : {
+          // A restarting container is on its way up, and starting it again
+          // would fight Docker rather than help it.
+          running:
+            container.state === 'running' || container.state === 'restarting',
+        };
+  };
 
   // Every runner id a reachable forge listed. A stored registration pointing
   // at an entity somebody deleted is told from a live one right here.
@@ -250,6 +288,20 @@ export function reconcile(
       continue;
     }
 
+    // The stack this seat runs on could not be queried on this host, so grove
+    // cannot tell a missing seat from an invisible one and does nothing.
+    const blind = hostStackError(observation, entry.stack);
+    if (blind !== undefined) {
+      degraded.push({
+        kind: 'report-degraded',
+        target: entry.name,
+        host: entry.host,
+        reason: blind,
+        destructive: false,
+      });
+      continue;
+    }
+
     const guard = observation.workRoots[entry.group];
     if (guard !== undefined && !guard.ok) {
       degraded.push({
@@ -272,21 +324,28 @@ export function reconcile(
       continue;
     }
 
-    const container = containers.get(containerKey(entry.host, entry.name));
+    // The group switched stack under a seat that is already running. The
+    // record still names the old supervisor, where the removal batch below
+    // drains it and retires the record, so the create waits for the next pass
+    // rather than running the same name on two supervisors at once.
+    if (record !== undefined && record.stack !== entry.stack) {
+      continue;
+    }
+
+    const seat = seatOn(entry.host, entry.name, entry.stack);
 
     // The name matches but no record claims it. Reported below, never adopted.
     if (
       record === undefined &&
-      (container !== undefined ||
+      (seat !== undefined ||
         sightings.has(sightingKey(entry.forge, entry.name)))
     ) {
       continue;
     }
 
-    if (container === undefined) {
+    if (seat === undefined) {
       // Only a create needs a registration token. A start reuses the one the
-      // container already holds, so a forge that did not answer must not
-      // block it.
+      // seat already holds, so a forge that did not answer must not block it.
       const forgeObservation = forges.get(entry.forge);
       if (forgeObservation === undefined || !forgeObservation.reachable) {
         if (!forgeBlockedGroups.has(entry.group)) {
@@ -321,6 +380,7 @@ export function reconcile(
         group: entry.group,
         index: entry.index,
         name: entry.name,
+        ...(entry.stack === 'native' ? { stack: entry.stack } : {}),
         ...(record === undefined ? {} : { recordId: record.id }),
         ...(renew === undefined ? {} : { renewRegistration: renew }),
         // Renewing throws away the only copy of a glrt- token, so the
@@ -330,11 +390,12 @@ export function reconcile(
       continue;
     }
 
-    if (container.state !== 'running' && container.state !== 'restarting') {
+    if (!seat.running) {
       converge.push({
         kind: 'start-container',
         host: entry.host,
         name: entry.name,
+        ...(entry.stack === 'native' ? { stack: entry.stack } : {}),
         ...(record === undefined ? {} : { recordId: record.id }),
         destructive: false,
       });
@@ -344,7 +405,10 @@ export function reconcile(
   // The highest index drains first, so a scale-down peels seats off the top
   // of the range in the order an operator reads them.
   const surplus = activeRecords
-    .filter((record) => !wanted.has(placementKey(record.host, record.name)))
+    .filter((record) => {
+      const seat = wanted.get(placementKey(record.host, record.name));
+      return seat === undefined || seat.stack !== record.stack;
+    })
     .sort(
       (left, right) =>
         right.index - left.index || left.name.localeCompare(right.name),
@@ -385,18 +449,38 @@ export function reconcile(
       continue;
     }
 
-    const container = containers.get(containerKey(record.host, record.name));
+    // The record names the supervisor that holds this seat, so it is read
+    // through that one and no other. The config may say something else today,
+    // and the seat that is running is still where it was created.
+    const stack = record.stack;
+    const present = seatOn(record.host, record.name, stack) !== undefined;
+
+    // Only that supervisor can prove this seat is gone, so only its silence
+    // stops the removal. The other one can be blind without holding it back.
+    const blind = hostStackError(observation, stack);
+    if (blind !== undefined) {
+      degraded.push({
+        kind: 'report-degraded',
+        target: record.name,
+        host: record.host,
+        reason: blind,
+        destructive: false,
+      });
+      continue;
+    }
+
     // Only the forge this record names. A colliding name at another forge is
     // unmanaged there, so grove must never delete it.
     const sighting = sightings.get(sightingKey(record.forge, record.name));
     const shared = sharedForges.has(record.forge);
     const drainTimeoutMs = drainByGroup.get(record.group) ?? fallbackDrain;
 
-    if (container !== undefined) {
+    if (present) {
       removals.push({
         kind: 'stop-container',
         host: record.host,
         name: record.name,
+        ...(stack === 'native' ? { stack } : {}),
         recordId: record.id,
         drainTimeoutMs,
         destructive: true,
@@ -417,24 +501,26 @@ export function reconcile(
         destructive: true,
       });
     }
-    if (container !== undefined) {
+    if (present) {
       removals.push({
         kind: 'remove-container',
         host: record.host,
         name: record.name,
+        ...(stack === 'native' ? { stack } : {}),
         recordId: record.id,
         destructive: true,
       });
     }
     // The report sits next to the retire it explains, so a reader of the plan
     // sees why the record goes without hunting through the report block.
-    if (container === undefined && sighting === undefined) {
+    if (!present && sighting === undefined) {
       removals.push({
         kind: 'report-orphan-record',
         name: record.name,
         recordId: record.id,
         host: record.host,
-        reason: 'no container and no forge runner behind this record',
+        reason:
+          'no container, no native unit and no forge runner behind this record',
         destructive: false,
       });
     }

@@ -23,6 +23,9 @@ function record(name: string, id = 1): RunnerRecord {
     forge: 'gh-overload',
     forgeRunnerId: null,
     systemId: null,
+    installDir: null,
+    workDir: null,
+    stack: 'docker',
     name,
     createdAt: 0,
     retiredAt: null,
@@ -235,5 +238,70 @@ describe('isDestroyable', () => {
     expect(isDestroyable(unmanaged, false)).toBe(false);
     expect(isDestroyable(unmanaged, true)).toBe(true);
     expect(isDestroyable(foreign, true)).toBe(false);
+  });
+});
+
+describe('classifyRunners, a native seat', () => {
+  const unit = {
+    name: 'grove-ios-1',
+    unit: 'com.cestoliv.grove.ios-1',
+    state: 'running' as const,
+    pid: 4242,
+    detail: 'pid 4242',
+  };
+
+  it('is managed when a record on that host claims it', () => {
+    const [entry] = classifyRunners(
+      [{ name: 'grove-ios-1', host: 'mac', native: unit }],
+      [
+        {
+          id: 1,
+          group: 'ios',
+          index: 1,
+          host: 'mac',
+          forge: 'gh-overload',
+          forgeRunnerId: null,
+          systemId: null,
+          installDir: null,
+          workDir: null,
+          stack: 'native',
+          name: 'grove-ios-1',
+          createdAt: 0,
+          retiredAt: null,
+        },
+      ],
+    );
+    expect(entry.ownership).toBe('managed');
+    expect(entry.native).toEqual(unit);
+  });
+
+  it('is unmanaged when no record claims it', () => {
+    const [entry] = classifyRunners(
+      [{ name: 'grove-ios-1', host: 'mac', native: unit }],
+      [],
+    );
+    expect(entry.ownership).toBe('unmanaged');
+    expect(entry.native).toEqual(unit);
+  });
+
+  it('never merges with a container of the same name on the same host', () => {
+    const entries = classifyRunners(
+      [
+        {
+          name: 'grove-ios-1',
+          host: 'mac',
+          container: container('grove-ios-1'),
+        },
+        { name: 'grove-ios-1', host: 'mac', native: unit },
+      ],
+      [{ ...record('grove-ios-1'), group: 'ios', stack: 'native' }],
+    );
+    expect(entries).toHaveLength(2);
+    const claimed = entries.find((entry) => entry.ownership === 'managed');
+    expect(claimed?.native).toEqual(unit);
+    expect(claimed?.container).toBeUndefined();
+    const stray = entries.find((entry) => entry.ownership === 'unmanaged');
+    expect(stray?.container?.name).toBe('grove-ios-1');
+    expect(stray?.native).toBeUndefined();
   });
 });

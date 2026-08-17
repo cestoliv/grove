@@ -191,5 +191,6 @@ export type Scope = z.infer<typeof scopeSchema>;
 export type Level = Scope['level'];
 export type Placement = Record<string, number>;
 export type GroupConfig = z.infer<typeof groupSchema>;
+export type StackKind = GroupConfig['stack'];
 export type ParsedConfig = z.infer<typeof configSchema>;
 export type GroveConfig = Omit<ParsedConfig, 'tick'> & { tick: TickConfig };

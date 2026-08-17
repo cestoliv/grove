@@ -39,6 +39,25 @@ describe('validateReferences', () => {
     );
   });
 
+  it('rejects a native group on a GitLab forge', () => {
+    const issues = validateReferences(
+      buildConfig({
+        forge: 'gl-chevro',
+        scope: { level: 'instance' },
+        stack: 'native',
+      }),
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0].path).toBe('groups[0].stack');
+    expect(issues[0].message).toBe(
+      'native runners on a GitLab forge are not supported. Use stack: docker for this group.',
+    );
+  });
+
+  it('accepts a native group on a GitHub forge', () => {
+    expect(validateReferences(buildConfig({ stack: 'native' }))).toEqual([]);
+  });
+
   it('reports an unknown placement host and lists the declared ones', () => {
     const issues = validateReferences(buildConfig({ placement: { nuc: 1 } }));
     expect(issues).toHaveLength(1);

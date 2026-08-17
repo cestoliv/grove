@@ -40,6 +40,7 @@ export {
   type Level,
   type Placement,
   type Scope,
+  type StackKind,
   type TickConfig,
 } from './schema.js';
 export { isDuration, isSize, parseDuration, parseSize } from './units.js';
@@ -47,6 +48,8 @@ export {
   archWarnings,
   type ConfigWarning,
   DOCKER_SOCKET_PATH,
+  NATIVE_UNUSED_KEYS,
+  nativeOptionWarnings,
   privilegedSocketWarnings,
   type WarningCode,
 } from './warnings.js';

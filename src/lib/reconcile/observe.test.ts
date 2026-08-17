@@ -121,10 +121,11 @@ describe('observeFleet', () => {
     expect(mac.commandLines()).toEqual(['uname -sm']);
   });
 
-  it('treats a host without docker as read only', async () => {
+  it('keeps a host without docker reachable and degrades that stack alone', async () => {
     const mac = new FakeTransport('mac')
       .on('uname', { stdout: 'Linux x86_64\n' })
       .on('sh -c printf', { stdout: '/home/ci' })
+      .on('id -u', { stdout: '1000\n' })
       .fail('docker ps', 'docker: command not found\n', 127);
     const observed = await observeFleet(config(), {
       transports: transports({ mac }),
@@ -133,8 +134,10 @@ describe('observeFleet', () => {
       ]),
     });
 
-    expect(observed.hosts[0].reachable).toBe(false);
-    expect(observed.hosts[0].reason).toMatch(/docker ps failed/);
+    expect(observed.hosts[0].reachable).toBe(true);
+    expect(observed.hosts[0].containers).toEqual([]);
+    expect(observed.hosts[0].containersError).toMatch(/docker ps failed/);
+    expect(observed.hosts[0].nativesError).toBeUndefined();
   });
 
   it('records a failed volume guard without failing the host', async () => {
@@ -155,6 +158,21 @@ describe('observeFleet', () => {
 
     expect(observed.hosts[0].reachable).toBe(true);
     expect(observed.hosts[0].workRoots['overload-arm'].ok).toBe(false);
+  });
+
+  it('keeps no $HOME that is not an absolute path', async () => {
+    const transport = new FakeTransport('mac')
+      .on('sh -c printf', { stdout: 'Users/o' })
+      .on('uname', { stdout: 'Darwin arm64\n' })
+      .on('docker ps', { stdout: '' });
+    const observed = await observeFleet(config(), {
+      transports: transports({ mac: transport }),
+      forgeClients: new Map([
+        ['gh-overload', new FakeForgeClient('gh-overload')],
+      ]),
+    });
+    expect(observed.hosts[0].reachable).toBe(true);
+    expect(observed.hosts[0].home).toBeUndefined();
   });
 
   it('marks one host unreachable on a home-read failure without touching another', async () => {
@@ -412,5 +430,141 @@ describe('observeFleet, a GitLab group', () => {
         call.args.some((arg) => arg.includes('.runner_system_id')),
       ),
     ).toBe(false);
+  });
+});
+
+describe('observeFleet, native seats', () => {
+  function nativeConfig(): GroveConfig {
+    return {
+      tick: { fast: 120_000, full: 1_800_000 },
+      hosts: { mac: { type: 'local', work_root: '/Volumes/ci/grove' } },
+      forges: { 'gh-overload': { kind: 'github' } },
+      groups: [
+        {
+          name: 'ios',
+          forge: 'gh-overload',
+          scope: { level: 'organization', target: 'Overload-coach' },
+          placement: { mac: 1 },
+          stack: 'native',
+          labels: ['macos'],
+        },
+      ],
+    } as unknown as GroveConfig;
+  }
+
+  function clients() {
+    return new Map([['gh-overload', new FakeForgeClient('gh-overload')]]);
+  }
+
+  it('reads the uid and lists what launchd loaded', async () => {
+    const mac = new FakeTransport('mac')
+      .on('uname', { stdout: 'Darwin arm64\n' })
+      .on('sh -c printf', { stdout: '/Users/olivier' })
+      .on('id -u', { stdout: '501\n' })
+      .on('docker ps', { stdout: '' })
+      .on('stat', { stdout: '17\n' })
+      .on('launchctl list', {
+        stdout: 'PID\tStatus\tLabel\n4242\t0\tcom.cestoliv.grove.ios-1\n',
+      });
+
+    const observed = await observeFleet(nativeConfig(), {
+      transports: transports({ mac }),
+      forgeClients: clients(),
+    });
+
+    expect(observed.hosts[0].uid).toBe('501');
+    expect(observed.hosts[0].natives).toEqual([
+      {
+        name: 'grove-ios-1',
+        unit: 'com.cestoliv.grove.ios-1',
+        state: 'running',
+        pid: 4242,
+        detail: 'pid 4242',
+      },
+    ]);
+    expect(observed.hosts[0].nativesError).toBeUndefined();
+  });
+
+  it('guards the work root of a native group, as it does a Docker one', async () => {
+    const mac = new FakeTransport('mac')
+      .on('uname', { stdout: 'Darwin arm64\n' })
+      .on('sh -c printf', { stdout: '/Users/olivier' })
+      .on('id -u', { stdout: '501\n' })
+      .on('docker ps', { stdout: '' })
+      .on('launchctl list', { stdout: 'PID\tStatus\tLabel\n' })
+      .fail('stat', 'stat: /Volumes/ci: No such file or directory\n', 1);
+
+    const observed = await observeFleet(
+      {
+        ...nativeConfig(),
+        hosts: { mac: { type: 'local', work_root: '/Volumes/ci/grove' } },
+      } as GroveConfig,
+      { transports: transports({ mac }), forgeClients: clients() },
+    );
+
+    expect(observed.hosts[0].workRoots.ios.ok).toBe(false);
+  });
+
+  it('degrades the native stack alone when the user bus is missing', async () => {
+    const atlas = new FakeTransport('atlas')
+      .on('uname', { stdout: 'Linux x86_64\n' })
+      .on('sh -c printf', { stdout: '/home/ci' })
+      .on('id -u', { stdout: '1000\n' })
+      .on('docker ps', { stdout: '' })
+      .fail(
+        'systemctl --user',
+        'Failed to connect to bus: $DBUS_SESSION_BUS_ADDRESS not defined\n',
+        1,
+      );
+
+    const observed = await observeFleet(
+      {
+        ...nativeConfig(),
+        hosts: { atlas: { type: 'ssh', host: 'atlas' } },
+        groups: [
+          {
+            name: 'ios',
+            forge: 'gh-overload',
+            scope: { level: 'organization', target: 'Overload-coach' },
+            placement: { atlas: 1 },
+            stack: 'native',
+          },
+        ],
+      } as unknown as GroveConfig,
+      { transports: transports({ atlas }), forgeClients: clients() },
+    );
+
+    expect(observed.hosts[0].reachable).toBe(true);
+    expect(observed.hosts[0].natives).toBeUndefined();
+    expect(observed.hosts[0].nativesError).toMatch(/loginctl enable-linger/);
+  });
+
+  it('asks the supervisor even on a host with no native group', async () => {
+    const mac = new FakeTransport('mac')
+      .on('uname', { stdout: 'Darwin arm64\n' })
+      .on('sh -c printf', { stdout: '/Users/olivier' })
+      .on('id -u', { stdout: '501\n' })
+      .on('docker ps', { stdout: '' })
+      .on('launchctl list', {
+        stdout: 'PID\tStatus\tLabel\n-\t0\tcom.cestoliv.grove.legacy-1\n',
+      });
+
+    const observed = await observeFleet(config(), {
+      transports: transports({ mac }),
+      forgeClients: new Map([
+        ['gh-overload', new FakeForgeClient('gh-overload')],
+      ]),
+    });
+
+    // Discovery is what makes the unmanaged cell of the ownership table real,
+    // and a seat whose group left the config still has to be seen.
+    expect(observed.hosts[0].natives).toEqual([
+      {
+        name: 'grove-legacy-1',
+        unit: 'com.cestoliv.grove.legacy-1',
+        state: 'stopped',
+        detail: 'last exit 0',
+      },
+    ]);
   });
 });

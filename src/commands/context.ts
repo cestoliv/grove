@@ -15,7 +15,12 @@ import {
   FORGE_CONCURRENCY,
   type Limiter,
 } from '../lib/reconcile/index.js';
-import { DockerStack, rawStackWarnings } from '../lib/stack/index.js';
+import {
+  createRunnerVersionResolver,
+  DockerStack,
+  type RunnerVersionResolver,
+  rawStackWarnings,
+} from '../lib/stack/index.js';
 import { resolveStateDbPath, StateStore } from '../lib/state/index.js';
 import {
   type ConnectFn,
@@ -26,14 +31,16 @@ import {
 
 export interface FleetContext {
   loaded: LoadedConfig;
-  // A malformed `raw:` block only surfaces when the Docker stack reads it,
-  // so every command gets the same reading from one place.
+  // A malformed `raw:` block only surfaces when the stack reads it, so every
+  // command gets the same reading from one place.
   rawWarnings: ConfigWarning[];
   transports: Map<string, Transport>;
   forgeClients: Map<string, ForgeClient>;
   stacks: Map<string, DockerStack>;
   store: StateStore;
   forgeLimit: Limiter;
+  // One lookup of the latest actions/runner release for the whole run.
+  runnerVersion: RunnerVersionResolver;
   close(): Promise<void>;
 }
 
@@ -54,6 +61,7 @@ export interface OpenFleetOptions {
     forge: ForgeConfig,
     token: string,
   ) => ForgeClient;
+  resolveRunnerVersion?: RunnerVersionResolver;
   // `logs` never calls a forge, and it is the command you reach for when the
   // setup is already broken. Set false and no token is resolved, so a missing
   // PAT cannot stop a read.
@@ -121,16 +129,18 @@ export async function openFleet(
             ...(forge.url === undefined ? {} : { url: forge.url }),
           }));
 
-  // Every Docker group's forge, whatever its kind. A group naming a forge
-  // that does not exist is a config error the loader already reported, and
-  // the guard keeps this from reading undefined if one ever gets through.
+  // Every group grove can act on, and therefore every forge it has to open.
+  // A native group on a GitLab forge is unsupported, so no client is built
+  // for it and no token is resolved on its behalf.
   const wanted = new Set(
     loaded.config.groups
-      .filter(
-        (group) =>
-          group.stack === 'docker' &&
-          loaded.config.forges[group.forge] !== undefined,
-      )
+      .filter((group) => {
+        const forge = loaded.config.forges[group.forge];
+        if (forge === undefined) {
+          return false;
+        }
+        return group.stack === 'docker' || forge.kind === 'github';
+      })
       .map((group) => group.forge),
   );
 
@@ -162,6 +172,8 @@ export async function openFleet(
     stacks,
     store,
     forgeLimit,
+    runnerVersion:
+      options.resolveRunnerVersion ?? createRunnerVersionResolver(),
     async close(): Promise<void> {
       await closeTransports();
       await closeLocalTransport();
