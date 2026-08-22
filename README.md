@@ -4,6 +4,40 @@ One YAML file describes a fleet of self-hosted GitHub and GitLab runners. grove 
 
 grove is agentless. One control node holds the config and reaches every host over SSH, or over a local transport when the host is the control node itself. Nothing is installed on the hosts except the runners.
 
+```mermaid
+flowchart LR
+    yaml[grove.yaml] --> grove
+
+    subgraph control["control node"]
+        grove["grove · plan, apply, daemon"]
+        db[(grove.db)]
+        grove --- db
+    end
+
+    grove -- "register, list" --> gh[GitHub]
+    grove -- "register, list" --> gl[GitLab]
+
+    grove -- ssh --> h1
+    grove -- ssh --> h2
+    grove -- local --> h3
+
+    subgraph h1["host: Linux"]
+        r1[docker · gitlab-runner]
+    end
+    subgraph h2["host: Mac"]
+        r2[docker · actions-runner]
+    end
+    subgraph h3["host: Mac, control node"]
+        r3[native · actions-runner under launchd]
+    end
+
+    r1 -. jobs .-> gl
+    r2 -. jobs .-> gh
+    r3 -. jobs .-> gh
+```
+
+The file says which runners exist, on which host, against which forge. `grove plan` shows the difference between the file and the hosts, `grove apply` makes it so, and `grove daemon` keeps doing that every few minutes.
+
 ## Status
 
 Milestone 6 of six, and the last one. grove manages GitHub and GitLab runners in Docker containers, and GitHub runners as processes on the host under launchd on macOS and systemd on Linux. `config`, `plan`, `apply`, `status`, `logs`, `doctor` and `teardown` work on every one of them. `grove daemon` converges the fleet on its own, detects stuck runners, prunes work directories against `max_work_size` and prunes its own history against `history.retention`. `grove doctor` checks every host, forge and group and prints the fix for each finding, and `metrics.listen` turns on a Prometheus exporter inside the daemon.
