@@ -19,11 +19,13 @@ import {
   META_LAST_FULL_TICK,
   type StateStore,
 } from '../lib/state/index.js';
+import { type CurrentJob, readCurrentJob } from '../lib/status/current-job.js';
 import { type LiveScreen, startLiveScreen } from '../lib/status/live.js';
 import { renderStatusReport } from '../lib/status/render.js';
 import {
   buildStatusReport,
   type DaemonStatus,
+  jobKey,
   livenessFor,
   type StatusReport,
   type SuspectRow,
@@ -131,6 +133,8 @@ export async function runStatus(
   const seenStorage = new Map<string, HostStorage>();
   const awaitedStorage = new Set<string>();
   const storageReads: Promise<unknown>[] = [];
+  const jobs = new Map<string, CurrentJob>();
+  const awaitedJobs = new Set<string>();
   const partial: ObservedState = { hosts: [], forges: [] };
   let awaitingForges = true;
   let screen: LiveScreen | undefined;
@@ -179,6 +183,7 @@ export async function runStatus(
     ...hostOrder
       .filter((name) => awaitedStorage.has(name))
       .map((name) => `storage on ${name}`),
+    ...[...awaitedJobs].map((name) => `the job on ${name}`),
   ];
 
   // Records change only when this run persists a system id, so the frames
@@ -195,7 +200,7 @@ export async function runStatus(
       fleet.loaded,
       { hosts: inOrder(seenHosts), forges: partial.forges },
       records,
-      { suspects, daemon, storage: inOrder(seenStorage) },
+      { suspects, daemon, storage: inOrder(seenStorage), jobs },
     );
     return renderStatusReport(draft, {
       ...(options.color === undefined ? {} : { color: options.color }),
@@ -247,14 +252,55 @@ export async function runStatus(
     // Before the records are read, so a manager grove just learned about
     // shows up in this run rather than the next one.
     persistSystemIds(observed, fleet.store.activeRunners(), fleet.store);
-    await Promise.all(storageReads);
+    // Which seats are busy is known only once the forges have answered, so
+    // the log tails start here rather than with the host reads. One command
+    // per busy seat, and none at all for an idle fleet.
+    const fresh = fleet.store.activeRunners();
+    const jobReads = buildStatusReport(fleet.loaded, observed, fresh, {
+      suspects,
+      daemon,
+    })
+      .rows.filter((row) => row.forgeStatus === 'busy')
+      .map((row) => {
+        const transport = fleet.transports.get(row.host);
+        const observation = seenHosts.get(row.host);
+        if (transport === undefined || observation?.reachable !== true) {
+          return Promise.resolve();
+        }
+        const group = fleet.loaded.config.groups.find(
+          (entry) => entry.name === row.group,
+        );
+        awaitedJobs.add(row.runner);
+        arrived();
+        return readCurrentJob({
+          transport,
+          host: row.host,
+          runner: row.runner,
+          stack: row.stack,
+          ...(group === undefined ? {} : { group }),
+          hostConfig: fleet.loaded.config.hosts[row.host],
+          ...(observation.home === undefined ? {} : { home: observation.home }),
+          ...(observation.platform === undefined
+            ? {}
+            : { platform: observation.platform }),
+          ...(observation.uid === undefined ? {} : { uid: observation.uid }),
+        }).then((job) => {
+          if (job !== undefined) {
+            jobs.set(jobKey(row.host, row.runner), job);
+          }
+          awaitedJobs.delete(row.runner);
+          arrived();
+        });
+      });
 
-    const report = buildStatusReport(
-      fleet.loaded,
-      observed,
-      fleet.store.activeRunners(),
-      { suspects, daemon, storage: inOrder(seenStorage) },
-    );
+    await Promise.all([...storageReads, ...jobReads]);
+
+    const report = buildStatusReport(fleet.loaded, observed, fresh, {
+      suspects,
+      daemon,
+      storage: inOrder(seenStorage),
+      jobs,
+    });
 
     // History, never a decision. A sample per managed runner per run.
     for (const row of report.rows) {

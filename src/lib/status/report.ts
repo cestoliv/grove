@@ -8,6 +8,7 @@ import {
 } from '../reconcile/index.js';
 import type { HostStorage } from '../stack/index.js';
 import type { LivenessState, RunnerRecord } from '../state/index.js';
+import type { CurrentJob } from './current-job.js';
 
 export interface StatusRow {
   group: string;
@@ -29,6 +30,9 @@ export interface StatusRow {
   // The raw GitLab word, because stale and offline are different problems.
   managerStatus?: string;
   contactedAt?: string;
+  // What the seat's own runner log says it is running, read only for a busy
+  // seat and only by `status`.
+  job?: CurrentJob;
   ownership: OwnershipClass;
   recordId?: number;
 }
@@ -68,6 +72,8 @@ export interface StatusReportOptions {
   // Measured by the caller, because it costs two commands per host and only
   // `status` is willing to spend them.
   storage?: HostStorage[];
+  // Keyed by `host/runner`, filled by the caller for the busy seats it read.
+  jobs?: Map<string, CurrentJob>;
 }
 
 export interface StatusReport {
@@ -80,6 +86,12 @@ export interface StatusReport {
   unreachableHosts: string[];
   unreachableForges: string[];
   ok: boolean;
+}
+
+// One seat is one name on one host, which is what both the reads and the
+// rows are keyed by.
+export function jobKey(host: string, runner: string): string {
+  return `${host}/${runner}`;
 }
 
 export function buildStatusReport(
@@ -115,6 +127,9 @@ export function buildStatusReport(
     // runner, and nothing when grove cannot yet prove which one that is.
     const manager = entry.forgeRunner?.managers?.[0];
     const group = entry.group ?? entry.record?.group ?? '-';
+    const job = options.jobs?.get(
+      jobKey(entry.host ?? entry.record?.host ?? '-', entry.name),
+    );
     rows.push({
       group,
       host: entry.host ?? entry.record?.host ?? '-',
@@ -132,6 +147,7 @@ export function buildStatusReport(
       detail: entry.native?.detail ?? entry.container?.status ?? '',
       forge: entry.forge ?? entry.record?.forge ?? '-',
       forgeStatus,
+      ...(job === undefined ? {} : { job }),
       ...(manager === undefined
         ? {}
         : {

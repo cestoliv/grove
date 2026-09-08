@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { formatBytes } from '../bytes.js';
 import { renderTable } from '../plan/render.js';
+import { formatElapsed } from './current-job.js';
 import type { StatusReport } from './report.js';
 
 const FORGE_COLUMN = 6;
@@ -12,6 +13,9 @@ export interface StatusRenderOptions {
   // on instead, marked with the spinner frame of the moment.
   pending?: string[];
   spinner?: string;
+  // What "now" means for the elapsed times, so a test reads the same cell
+  // twice.
+  now?: number;
 }
 
 function stamp(ts: number | undefined): string {
@@ -33,6 +37,18 @@ export function renderStatusReport(
     const showManagers = report.rows.some(
       (row) => row.managerStatus !== undefined,
     );
+    // Only a busy seat has a job, and only `status` reads one, so an idle
+    // fleet and every other caller keep the narrower table.
+    const showJobs = report.rows.some((row) => row.job !== undefined);
+    const now = options.now ?? Date.now();
+    const jobCell = (row: StatusReport['rows'][number]): string => {
+      if (row.job === undefined) {
+        return row.forgeStatus === 'busy' ? 'unknown' : '-';
+      }
+      return row.job.startedAt === undefined
+        ? row.job.label
+        : `${row.job.label} ${formatElapsed(now - row.job.startedAt)}`;
+    };
     const rows = report.rows.map((row) => [
       row.group,
       row.host,
@@ -41,6 +57,7 @@ export function renderStatusReport(
       row.process,
       row.detail,
       row.forgeStatus,
+      ...(showJobs ? [jobCell(row)] : []),
       ...(showManagers ? [row.managerStatus ?? '-'] : []),
       row.ownership,
     ]);
@@ -53,6 +70,7 @@ export function renderStatusReport(
         'PROCESS',
         'DETAIL',
         'FORGE',
+        ...(showJobs ? ['JOB'] : []),
         ...(showManagers ? ['MANAGER'] : []),
         'OWNER',
       ],

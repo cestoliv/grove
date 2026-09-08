@@ -59,6 +59,10 @@ function mac(): FakeTransport {
     });
 }
 
+function isLogRead(call: { command: string; args: string[] }): boolean {
+  return call.command === 'sh' && call.args[1]?.startsWith('docker logs');
+}
+
 function options(extra: Record<string, unknown> = {}) {
   return {
     config: join(dir, 'grove.yaml'),
@@ -87,6 +91,39 @@ describe('runStatus', () => {
     expect(text).toContain('grove-overload-arm-1');
     expect(text).toContain('busy');
     expect(text).toContain('unmanaged');
+  });
+
+  it('names the job a busy seat is running, from its own log', async () => {
+    const out: string[] = [];
+    const transport = mac().on('sh -c docker logs', {
+      stdout: '2026-09-08 11:02:03Z: Running job: build (macos)\n',
+    });
+    const code = await runStatus(
+      options({
+        connect: () => transport,
+        json: true,
+        stdout: (text: string) => out.push(text),
+      }),
+    );
+
+    expect(code).toBe(EXIT_OK);
+    expect(JSON.parse(out.join('\n')).rows[0].job).toEqual({
+      label: 'build (macos)',
+      startedAt: Date.parse('2026-09-08T11:02:03Z'),
+    });
+    // One log read, for the one seat the forge called busy.
+    expect(transport.calls.filter(isLogRead)).toHaveLength(1);
+  });
+
+  it('reads no log for a seat the forge calls idle', async () => {
+    const transport = mac();
+    client = new FakeForgeClient('gh-overload').addRunner({
+      name: 'grove-overload-arm-1',
+      id: '11',
+      busy: false,
+    });
+    await runStatus(options({ connect: () => transport }));
+    expect(transport.calls.some(isLogRead)).toBe(false);
   });
 
   it('prints JSON with --json and nothing else', async () => {
