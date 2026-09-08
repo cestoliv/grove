@@ -86,16 +86,33 @@ export const forgeAuthSchema = z.union([tokenAuthSchema, commandAuthSchema], {
     'auth must be { token: "${ENV_VAR}" } or { command: "..." }, or absent to delegate to the gh or glab CLI',
 });
 
+// A queue sweep costs one call per repository or project, because neither
+// forge exposes a fleet-wide queue. The window is what bounds that cost: a
+// repository nobody has pushed to has nothing waiting.
+export const DEFAULT_QUEUE_ACTIVE_WITHIN_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const queueSchema = z
+  .strictObject({
+    active_within: durationSchema.optional(),
+    enabled: z.boolean().optional(),
+  })
+  .transform((value) => ({
+    activeWithinMs: value.active_within ?? DEFAULT_QUEUE_ACTIVE_WITHIN_MS,
+    enabled: value.enabled ?? true,
+  }));
+
 const githubForgeSchema = z.strictObject({
   kind: z.literal('github'),
   url: z.url().optional(),
   auth: forgeAuthSchema.optional(),
+  queue: queueSchema.optional(),
 });
 
 const gitlabForgeSchema = z.strictObject({
   kind: z.literal('gitlab'),
   url: z.url(),
   auth: forgeAuthSchema.optional(),
+  queue: queueSchema.optional(),
 });
 
 export const forgeSchema = z.discriminatedUnion(
@@ -107,6 +124,7 @@ export const forgeSchema = z.discriminatedUnion(
 export type HostConfig = z.infer<typeof hostSchema>;
 export type ForgeConfig = z.infer<typeof forgeSchema>;
 export type ForgeAuth = z.infer<typeof forgeAuthSchema>;
+export type QueueConfig = { activeWithinMs: number; enabled: boolean };
 export type ForgeKind = ForgeConfig['kind'];
 export type TickConfig = { fast: number; full: number };
 

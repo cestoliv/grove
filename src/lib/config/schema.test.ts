@@ -446,3 +446,24 @@ describe('metricsSchema', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('forge queue block', () => {
+  it('leaves the block absent when the file says nothing', () => {
+    const forge = forgeSchema.parse({ kind: 'github' });
+    expect(forge.queue).toBeUndefined();
+  });
+
+  it('parses active_within as a duration', () => {
+    const forge = forgeSchema.parse({
+      kind: 'github',
+      queue: { active_within: '2h', enabled: false },
+    });
+    expect(forge.queue).toEqual({ activeWithinMs: 7_200_000, enabled: false });
+  });
+
+  it('rejects an unparseable window', () => {
+    expect(() =>
+      forgeSchema.parse({ kind: 'github', queue: { active_within: 'soon' } }),
+    ).toThrow();
+  });
+});

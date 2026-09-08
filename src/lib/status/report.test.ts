@@ -495,3 +495,101 @@ describe('buildStatusReport, storage', () => {
     expect(buildStatusReport(loaded(), observed(), []).storage).toEqual([]);
   });
 });
+
+describe('buildStatusReport, the queue', () => {
+  const loaded: LoadedConfig = {
+    path: '/work/grove.yaml',
+    warnings: [],
+    config: {
+      tick: { fast: 120_000, full: 1_800_000 },
+      hosts: { mac: { type: 'local' } },
+      forges: { gh: { kind: 'github' } },
+      groups: [
+        {
+          name: 'overload-macos',
+          forge: 'gh',
+          scope: SCOPE,
+          placement: { mac: 1 },
+          stack: 'docker',
+        },
+        {
+          name: 'overload-arm64',
+          forge: 'gh',
+          scope: SCOPE,
+          placement: { mac: 1 },
+          stack: 'docker',
+        },
+      ],
+    },
+  } as unknown as LoadedConfig;
+  const observed: ObservedState = { hosts: [], forges: [] };
+  const records: RunnerRecord[] = [];
+
+  it('counts the waiting jobs of every group and names the oldest', () => {
+    const report = buildStatusReport(loaded, observed, records, {
+      queue: {
+        swept: true,
+        notes: [],
+        unknownForges: [],
+        rows: [
+          {
+            forge: 'gh',
+            group: 'overload-macos',
+            project: 'acme/mobile',
+            name: 'e2e',
+            labels: [],
+            queuedAt: 1000,
+            url: '',
+          },
+          {
+            forge: 'gh',
+            group: 'overload-macos',
+            project: 'acme/mobile',
+            name: 'unit',
+            labels: [],
+            queuedAt: 4000,
+            url: '',
+          },
+        ],
+      },
+    });
+    const macos = report.queueRows.find(
+      (row) => row.group === 'overload-macos',
+    );
+    expect(macos).toEqual({
+      group: 'overload-macos',
+      waiting: 2,
+      oldest: 1000,
+    });
+  });
+
+  it('gives every group a row, so a zero is visible', () => {
+    const report = buildStatusReport(loaded, observed, records, {
+      queue: { swept: true, notes: [], unknownForges: [], rows: [] },
+    });
+    expect(report.queueRows.every((row) => row.waiting === 0)).toBe(true);
+    expect(report.queueRows.length).toBe(loaded.config.groups.length);
+  });
+
+  it('leaves waiting undefined for a group whose forge failed to sweep', () => {
+    const report = buildStatusReport(loaded, observed, records, {
+      queue: {
+        swept: true,
+        notes: ['forge gh: boom'],
+        unknownForges: ['gh'],
+        rows: [],
+      },
+    });
+    // Never a `0`: a failed sweep must read as unknown, not as an empty
+    // queue, or an expired token looks the same as nothing waiting.
+    expect(report.queueRows.every((row) => row.waiting === undefined)).toBe(
+      true,
+    );
+    expect(report.queueRows.length).toBe(loaded.config.groups.length);
+  });
+
+  it('has no queue rows when nothing swept', () => {
+    const report = buildStatusReport(loaded, observed, records, {});
+    expect(report.queueRows).toEqual([]);
+  });
+});

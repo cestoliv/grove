@@ -24,6 +24,7 @@ describe('buildProgram', () => {
       'doctor',
       'logs',
       'plan',
+      'queue',
       'status',
       'teardown',
     ]);
@@ -209,5 +210,28 @@ describe('buildProgram, run end to end', () => {
     expect(errors.join('\n')).toBe(
       '-n wants a whole number of lines, not "abc".',
     );
+  });
+
+  it('exits 0 for `grove queue --help`, and mentions waiting', async () => {
+    const program = buildProgram();
+    const queue = program.commands.find(
+      (command) => command.name() === 'queue',
+    );
+    queue?.exitOverride();
+
+    const out: string[] = [];
+    const spy = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string) => {
+      out.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      await expect(
+        program.parseAsync(['queue', '--help'], { from: 'user' }),
+      ).rejects.toMatchObject({ exitCode: 0, code: 'commander.helpDisplayed' });
+    } finally {
+      process.stdout.write = spy;
+    }
+    expect(out.join('')).toContain('waiting');
   });
 });

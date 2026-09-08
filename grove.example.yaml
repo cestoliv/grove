@@ -37,6 +37,9 @@ forges:
   gh-overload:
     kind: github
     auth: { token: "${GH_TOKEN}" }
+    queue:
+      active_within: 7d          # a repository nobody pushed to has nothing waiting
+      enabled: true              # false when a forge's queue is not worth the API calls
   gl-chevro:
     kind: gitlab
     url: https://git.chevro.fr

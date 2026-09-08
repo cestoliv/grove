@@ -92,6 +92,28 @@ export function renderStatusReport(
     }
   }
 
+  // A note has to survive even when no group has a row worth drawing, or a
+  // forge that cannot be swept vanishes from `status` along with its note.
+  if (report.queueRows.length > 0 || report.queueNotes.length > 0) {
+    lines.push('', 'Queue');
+    if (report.queueRows.length > 0) {
+      const now = options.now ?? Date.now();
+      for (const line of renderTable(
+        ['GROUP', 'WAITING', 'OLDEST'],
+        report.queueRows.map((row) => [
+          row.group,
+          row.waiting === undefined ? '-' : String(row.waiting),
+          row.oldest === undefined ? '-' : formatElapsed(now - row.oldest),
+        ]),
+      )) {
+        lines.push(`  ${line}`);
+      }
+    }
+    for (const note of report.queueNotes) {
+      lines.push(`  ${c.dim(note)}`);
+    }
+  }
+
   if (report.sharedRunners.length > 0) {
     lines.push('', 'Shared runners');
     for (const line of renderTable(

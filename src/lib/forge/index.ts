@@ -41,6 +41,8 @@ export {
   type ForgeErrorDetails,
   type ForgeRunner,
   type ForgeRunnerManager,
+  type QueuedJob,
+  type QueueSweepOptions,
   type RegistrationRequest,
   type RunnerRegistration,
 } from './types.js';

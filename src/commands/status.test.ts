@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { StateLock } from '../lib/daemon/lock.js';
 import { FakeForgeClient } from '../lib/forge/index.js';
 import { StateStore } from '../lib/state/index.js';
-import { FakeTransport } from '../lib/transport/index.js';
+import { FakeTransport, type Transport } from '../lib/transport/index.js';
 import { EXIT_OK, EXIT_UNREACHABLE } from './plan.js';
 import { runStatus } from './status.js';
 
@@ -61,6 +61,27 @@ function mac(): FakeTransport {
 
 function isLogRead(call: { command: string; args: string[] }): boolean {
   return call.command === 'sh' && call.args[1]?.startsWith('docker logs');
+}
+
+// Delays every call whose command line starts with `prefix` by `ms`, real
+// time. Used to hold a storage read open past the point the queue sweep
+// (which never waits on a timer) has already resolved.
+function delayed(transport: Transport, prefix: string, ms: number): Transport {
+  return {
+    name: transport.name,
+    exec: (command, args, opts) => {
+      const line = [command, ...args].join(' ');
+      if (!line.startsWith(prefix)) {
+        return transport.exec(command, args, opts);
+      }
+      return new Promise((resolve) => {
+        setTimeout(() => resolve(transport.exec(command, args, opts)), ms);
+      });
+    },
+    readFile: (path) => transport.readFile(path),
+    writeFile: (path, content) => transport.writeFile(path, content),
+    close: () => transport.close(),
+  };
 }
 
 function options(extra: Record<string, unknown> = {}) {
@@ -157,6 +178,14 @@ describe('runStatus', () => {
       }),
     );
     expect(code).toBe(EXIT_UNREACHABLE);
+  });
+
+  it('prints the queue and skips the sweep with queue: false', async () => {
+    const lines: string[] = [];
+    await runStatus(
+      options({ stdout: (text: string) => lines.push(text), queue: false }),
+    );
+    expect(lines.join('\n')).not.toContain('Queue');
   });
 });
 
@@ -325,5 +354,37 @@ describe('runStatus in a terminal', () => {
     expect(JSON.parse(out.join('\n')).rows[0].runner).toBe(
       'grove-overload-arm-1',
     );
+  });
+
+  it('draws the Queue section as soon as the sweep lands, without waiting on a slow host', async () => {
+    client.setQueuedJobs([
+      {
+        project: 'acme/mobile',
+        name: 'e2e',
+        labels: [],
+        queuedAt: 1000,
+        url: '',
+      },
+    ]);
+    // The work-dir usage script is the slow read status waits on; the queue
+    // sweep has no timer in it at all, so it always resolves first.
+    const transport = delayed(mac(), 'sh -c set --', 20);
+    const frames: string[] = [];
+    await runStatus(
+      options({
+        connect: () => transport,
+        live: true,
+        stdout: undefined,
+        liveStdout: (text: string) => frames.push(text),
+        liveColumns: 200,
+        liveIntervalMs: 1_000_000,
+      }),
+    );
+
+    const midFlight = frames.find(
+      (frame) => frame.includes('Queue') && frame.includes('waiting on'),
+    );
+    expect(midFlight).toBeDefined();
+    expect(midFlight).toContain('storage on mac');
   });
 });

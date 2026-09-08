@@ -167,3 +167,36 @@ describe('FakeForgeClient, shared registration', () => {
     expect(runner.managers).toBeUndefined();
   });
 });
+
+describe('FakeForgeClient, queued jobs', () => {
+  it('returns the queued jobs it was given', async () => {
+    const client = new FakeForgeClient('fake').setQueuedJobs([
+      {
+        project: 'acme/api',
+        name: 'build',
+        labels: ['self-hosted', 'arm64'],
+        queuedAt: 1_700_000_000_000,
+        url: 'https://forge.test/acme/api/jobs/1',
+      },
+    ]);
+    const jobs = await client.listQueuedJobs?.(
+      { level: 'organization', target: 'acme' },
+      { activeSince: 0 },
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs?.[0].name).toBe('build');
+  });
+
+  it('fails the sweep when told to', async () => {
+    const client = new FakeForgeClient('fake').failOn(
+      'listQueuedJobs',
+      'no queue for you',
+    );
+    await expect(
+      client.listQueuedJobs?.(
+        { level: 'organization', target: 'acme' },
+        { activeSince: 0 },
+      ),
+    ).rejects.toThrow('no queue for you');
+  });
+});

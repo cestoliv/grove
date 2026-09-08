@@ -1,4 +1,5 @@
 import type { LoadedConfig, StackKind } from '../config/index.js';
+import type { QueueReport } from '../queue/index.js';
 import {
   classifyRunners,
   flattenObserved,
@@ -55,6 +56,15 @@ export interface SuspectRow {
   reason: string;
 }
 
+export interface QueueRow {
+  group: string;
+  // Undefined when the group's forge could not be swept, so its count is
+  // unknown rather than a wrong zero.
+  waiting: number | undefined;
+  // Epoch milliseconds of the longest wait, absent when nothing waits.
+  oldest?: number;
+}
+
 // What the control loop is doing, read from the lockfile and the meta table
 // rather than derived from anything grove observed on this run.
 export interface DaemonStatus {
@@ -74,6 +84,7 @@ export interface StatusReportOptions {
   storage?: HostStorage[];
   // Keyed by `host/runner`, filled by the caller for the busy seats it read.
   jobs?: Map<string, CurrentJob>;
+  queue?: QueueReport;
 }
 
 export interface StatusReport {
@@ -83,6 +94,8 @@ export interface StatusReport {
   suspects: SuspectRow[];
   daemon?: DaemonStatus;
   storage: HostStorage[];
+  queueRows: QueueRow[];
+  queueNotes: string[];
   unreachableHosts: string[];
   unreachableForges: string[];
   ok: boolean;
@@ -194,6 +207,35 @@ export function buildStatusReport(
     .filter((forge) => !forge.reachable)
     .map((forge) => forge.forge);
 
+  // Every group gets a row, because a zero is the answer to "is anything
+  // waiting on this group", and a missing row is not. A group whose forge
+  // never swept gets `waiting: undefined` instead, so it never reads as
+  // that same zero.
+  const unknownForges = new Set(options.queue?.unknownForges ?? []);
+  const queueRows: QueueRow[] =
+    options.queue?.swept !== true
+      ? []
+      : loaded.config.groups.map((group) => {
+          if (unknownForges.has(group.forge)) {
+            return { group: group.name, waiting: undefined };
+          }
+          const waiting = (options.queue as QueueReport).rows.filter(
+            (row) => row.group === group.name,
+          );
+          const oldest = waiting.reduce<number | undefined>(
+            (found, row) =>
+              found === undefined || row.queuedAt < found
+                ? row.queuedAt
+                : found,
+            undefined,
+          );
+          return {
+            group: group.name,
+            waiting: waiting.length,
+            ...(oldest === undefined ? {} : { oldest }),
+          };
+        });
+
   return {
     configPath: loaded.path,
     rows,
@@ -201,6 +243,8 @@ export function buildStatusReport(
     suspects: options.suspects ?? [],
     ...(options.daemon === undefined ? {} : { daemon: options.daemon }),
     storage: options.storage ?? [],
+    queueRows,
+    queueNotes: options.queue?.notes ?? [],
     unreachableHosts,
     unreachableForges,
     ok: unreachableHosts.length === 0 && unreachableForges.length === 0,

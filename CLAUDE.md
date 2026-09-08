@@ -17,7 +17,7 @@ Each file is named after its topic in `SCREAMING_SNAKE_CASE.md` (e.g., `BOTTOM_S
 
 **Current docs:**
 
-- _(none yet)_
+- `QUEUE.md` — what a queue sweep costs, and why neither forge can answer in one call
 
 **When working in this repo, proactively offer to create or update a doc file** whenever you:
 

@@ -352,6 +352,35 @@ Suspect runners
 
 `grove logs` takes a group name or a runner name, and reads whichever stack that runner uses. A Docker seat goes to `docker logs`. A native seat on macOS goes to `tail` on the two files launchd redirects into, `<install_dir>/stdout.log` and `<install_dir>/stderr.log`. A native seat on Linux goes to `journalctl --user -u grove-<group>-<index>.service`, and grove points at the runner's own `_diag` directory when `journalctl` is not installed. A group with several runners prints each in turn with a header. `--follow` needs exactly one runner. `--tail` defaults to 200 lines.
 
+## Queue
+
+```bash
+grove queue
+grove queue --json
+```
+
+`grove queue` lists every job waiting for a runner. `WAITING` shows how long the job has waited, in whole units.
+
+```
+GROUP         FORGE    PROJECT      JOB    LABELS       WAITING
+overload-arm  gh-over  acme/mobile  build  arm64,macOS  4m
+```
+
+When nothing waits, it says so. `grove status` runs the same sweep and adds a `Queue` block. Pass `--no-queue` to skip it for a faster status.
+
+Neither forge exposes a fleet-wide queue. A sweep costs one call per active repository or project. GitHub cannot sweep at enterprise scope, because GitHub lists no repositories for an enterprise. Set a `queue` block under a forge to bound that cost or turn the sweep off.
+
+```yaml
+forges:
+  gh-acme:
+    kind: github
+    queue:
+      active_within: 7d
+      enabled: true
+```
+
+`active_within` skips a repository or project idle longer than that window. `enabled: false` turns the sweep off for that forge.
+
 ## Doctor
 
 ```bash

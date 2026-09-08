@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Scope } from '../config/index.js';
+import type { FetchFn } from './github.js';
 import { GITLAB_MAX_PAGES, GitlabClient } from './gitlab.js';
 
 // Built at runtime so no fixture in this repo ever looks like a real secret.
@@ -358,5 +359,78 @@ describe('GitlabClient shape', () => {
     expect(gitlab.kind).toBe('gitlab');
     expect(gitlab.sharedRegistration).toBe(true);
     expect(gitlab.name).toBe('gl-chevro');
+  });
+});
+
+describe('listQueuedJobs', () => {
+  it('lists pending jobs for every recently active project', async () => {
+    const paths: string[] = [];
+    const fetchFn = (async (url: string) => {
+      const path = new URL(url).pathname + new URL(url).search;
+      paths.push(path);
+      if (path.includes('/projects?')) {
+        return json([{ id: 3, path_with_namespace: 'infra/ci' }]);
+      }
+      return json([
+        {
+          name: 'deploy',
+          status: 'pending',
+          tag_list: ['docker', 'dind'],
+          created_at: '2026-09-08T09:00:00Z',
+          web_url: 'https://gl.test/infra/ci/-/jobs/12',
+        },
+      ]);
+    }) as unknown as FetchFn;
+
+    const client = new GitlabClient({
+      name: 'gl',
+      token: 't',
+      url: 'https://gl.test',
+      fetchFn,
+    });
+    const jobs = await client.listQueuedJobs(
+      { level: 'instance' },
+      { activeSince: Date.parse('2026-09-01T00:00:00Z') },
+    );
+
+    expect(jobs).toEqual([
+      {
+        project: 'infra/ci',
+        name: 'deploy',
+        labels: ['docker', 'dind'],
+        queuedAt: Date.parse('2026-09-08T09:00:00Z'),
+        url: 'https://gl.test/infra/ci/-/jobs/12',
+      },
+    ]);
+    expect(paths.some((path) => path.includes('last_activity_after'))).toBe(
+      true,
+    );
+  });
+
+  it('skips a project that answers 403 rather than failing the sweep', async () => {
+    const fetchFn = (async (url: string) => {
+      if (url.includes('/projects?')) {
+        return json([
+          { id: 3, path_with_namespace: 'infra/ci' },
+          { id: 4, path_with_namespace: 'infra/locked' },
+        ]);
+      }
+      if (url.includes('/projects/4/jobs')) {
+        return new Response(JSON.stringify({ message: '403 Forbidden' }), {
+          status: 403,
+        });
+      }
+      return json([]);
+    }) as unknown as FetchFn;
+
+    const client = new GitlabClient({
+      name: 'gl',
+      token: 't',
+      url: 'https://gl.test',
+      fetchFn,
+    });
+    await expect(
+      client.listQueuedJobs({ level: 'instance' }, { activeSince: 0 }),
+    ).resolves.toEqual([]);
   });
 });

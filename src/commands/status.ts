@@ -3,6 +3,11 @@ import { isPidAlive } from '../lib/daemon/lock.js';
 import { DAEMON_LOCK_FILE, daemonLockPath } from '../lib/daemon/paths.js';
 import { EXIT_OK, EXIT_UNREACHABLE } from '../lib/exit-codes.js';
 import {
+  type QueueReport,
+  readQueue,
+  runnersByGroup,
+} from '../lib/queue/index.js';
+import {
   type HostObservation,
   type ObservedState,
   observeFleet,
@@ -47,6 +52,9 @@ export interface StatusCommandOptions extends PlanCommandOptions {
   liveColumns?: number;
   liveRows?: number;
   liveIntervalMs?: number;
+  // The sweep costs one forge call per active repository or project, so
+  // `--no-queue` buys back a fast status.
+  queue?: boolean;
 }
 
 function readTick(store: StateStore, key: string): number | undefined {
@@ -137,6 +145,8 @@ export async function runStatus(
   const awaitedJobs = new Set<string>();
   const partial: ObservedState = { hosts: [], forges: [] };
   let awaitingForges = true;
+  let awaitingQueue = options.queue !== false;
+  let queue: QueueReport | undefined;
   let screen: LiveScreen | undefined;
 
   // Two commands per reachable host: the image store and the work dirs.
@@ -184,6 +194,7 @@ export async function runStatus(
       .filter((name) => awaitedStorage.has(name))
       .map((name) => `storage on ${name}`),
     ...[...awaitedJobs].map((name) => `the job on ${name}`),
+    ...(awaitingQueue ? ['the queue'] : []),
   ];
 
   // Records change only when this run persists a system id, so the frames
@@ -200,7 +211,13 @@ export async function runStatus(
       fleet.loaded,
       { hosts: inOrder(seenHosts), forges: partial.forges },
       records,
-      { suspects, daemon, storage: inOrder(seenStorage), jobs },
+      {
+        suspects,
+        daemon,
+        storage: inOrder(seenStorage),
+        jobs,
+        ...(queue === undefined ? {} : { queue }),
+      },
     );
     return renderStatusReport(draft, {
       ...(options.color === undefined ? {} : { color: options.color }),
@@ -293,13 +310,32 @@ export async function runStatus(
         });
       });
 
-    await Promise.all([...storageReads, ...jobReads]);
+    // Costs one forge call per active repository or project, so it runs
+    // alongside the storage and job reads rather than after them, and lands
+    // in `queue` the moment it resolves so a mid-flight frame can show it
+    // without waiting on a slow host.
+    const queueRead: Promise<unknown> =
+      options.queue === false
+        ? Promise.resolve(undefined)
+        : readQueue({
+            config: fleet.loaded.config,
+            forgeClients: fleet.forgeClients,
+            runnersByGroup: runnersByGroup(observed, fresh),
+            limit: fleet.forgeLimit,
+          }).then((result) => {
+            queue = result;
+            awaitingQueue = false;
+            arrived();
+          });
+
+    await Promise.all([queueRead, ...storageReads, ...jobReads]);
 
     const report = buildStatusReport(fleet.loaded, observed, fresh, {
       suspects,
       daemon,
       storage: inOrder(seenStorage),
       jobs,
+      ...(queue === undefined ? {} : { queue }),
     });
 
     // History, never a decision. A sample per managed runner per run.

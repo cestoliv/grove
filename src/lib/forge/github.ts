@@ -3,6 +3,7 @@ import { errorMessage } from '../errors.js';
 import {
   type GithubEndpoints,
   githubEndpoints,
+  parseRepository,
   registrationUrl,
   runnersPath,
 } from './github-scope.js';
@@ -10,6 +11,8 @@ import {
   type ForgeClient,
   ForgeError,
   type ForgeRunner,
+  type QueuedJob,
+  type QueueSweepOptions,
   type RegistrationRequest,
   type RunnerRegistration,
 } from './types.js';
@@ -48,6 +51,25 @@ interface RunnerListBody {
     status?: string;
     busy?: boolean;
     labels?: Array<{ name: string }>;
+  }>;
+}
+
+interface RepoListBody {
+  full_name: string;
+  pushed_at?: string;
+}
+
+interface RunListBody {
+  workflow_runs?: Array<{ id: number | string; created_at?: string }>;
+}
+
+interface JobListBody {
+  jobs?: Array<{
+    name: string;
+    status?: string;
+    labels?: string[];
+    started_at?: string | null;
+    html_url?: string;
   }>;
 }
 
@@ -142,6 +164,109 @@ export class GithubClient implements ForgeClient {
       }
       throw error;
     }
+  }
+
+  async listQueuedJobs(
+    scope: Scope,
+    options: QueueSweepOptions,
+  ): Promise<QueuedJob[]> {
+    const limit = options.limit ?? (<T>(task: () => Promise<T>) => task());
+    const repos = await this.sweepTargets(scope, options.activeSince, limit);
+    const found = await Promise.all(
+      repos.map((repo) =>
+        // One repository's failure, an archived repo or an odd permission,
+        // is one repository grove cannot see, never a failed sweep.
+        this.queuedJobsIn(repo, limit).catch((error) => {
+          if (
+            error instanceof ForgeError &&
+            (error.status === 403 || error.status === 404)
+          ) {
+            return [] as QueuedJob[];
+          }
+          throw error;
+        }),
+      ),
+    );
+    return found.flat();
+  }
+
+  // GitHub sorts by push date, so the first repository outside the window
+  // ends the walk: everything after it is older still.
+  private async sweepTargets(
+    scope: Scope,
+    activeSince: number,
+    limit: <T>(task: () => Promise<T>) => Promise<T>,
+  ): Promise<string[]> {
+    if (scope.level === 'repository') {
+      const { owner, repo } = parseRepository(scope.target);
+      return [`${owner}/${repo}`];
+    }
+    if (scope.level !== 'organization') {
+      throw new ForgeError(
+        `forge "${this.name}": a queue sweep is not supported at enterprise scope, because GitHub lists no repositories for an enterprise`,
+        { forge: this.name },
+      );
+    }
+    const org = encodeURIComponent(scope.target);
+    const repos: string[] = [];
+    for (let page = 1; page <= MAX_RUNNER_PAGES; page += 1) {
+      const batch =
+        (await limit(() =>
+          this.request<RepoListBody[]>(
+            'GET',
+            `/orgs/${org}/repos?sort=pushed&direction=desc&per_page=${this.perPage}&page=${page}`,
+          ),
+        )) ?? [];
+      for (const repo of batch) {
+        const pushed = Date.parse(repo.pushed_at ?? '');
+        if (!Number.isFinite(pushed) || pushed < activeSince) {
+          return repos;
+        }
+        repos.push(repo.full_name);
+      }
+      if (batch.length < this.perPage) {
+        return repos;
+      }
+    }
+    return repos;
+  }
+
+  private async queuedJobsIn(
+    fullName: string,
+    limit: <T>(task: () => Promise<T>) => Promise<T>,
+  ): Promise<QueuedJob[]> {
+    const runs =
+      (
+        await limit(() =>
+          this.request<RunListBody>(
+            'GET',
+            `/repos/${fullName}/actions/runs?status=queued&per_page=${this.perPage}`,
+          ),
+        )
+      )?.workflow_runs ?? [];
+    const perRun = await Promise.all(
+      runs.map(async (run) => {
+        const body = await limit(() =>
+          this.request<JobListBody>(
+            'GET',
+            `/repos/${fullName}/actions/runs/${run.id}/jobs?per_page=${this.perPage}`,
+          ),
+        );
+        const queuedAt = Date.parse(run.created_at ?? '') || 0;
+        return (body?.jobs ?? [])
+          .filter((job) => job.status === 'queued')
+          .map((job) => ({
+            project: fullName,
+            name: job.name,
+            labels: job.labels ?? [],
+            queuedAt: Number.isFinite(Date.parse(job.started_at ?? ''))
+              ? Date.parse(job.started_at as string)
+              : queuedAt,
+            url: job.html_url ?? '',
+          }));
+      }),
+    );
+    return perRun.flat();
   }
 
   private async request<T>(
