@@ -14,6 +14,27 @@ export interface ForgeRunnerManager {
   ipAddress?: string;
 }
 
+// One job waiting for a runner. `labels` carries GitHub labels and GitLab
+// tags alike, because both answer the same question: which runner may take
+// this job.
+export interface QueuedJob {
+  // owner/repo on GitHub, the full namespace path on GitLab.
+  project: string;
+  name: string;
+  labels: string[];
+  queuedAt: number;
+  url: string;
+}
+
+export interface QueueSweepOptions {
+  // Epoch milliseconds. A repository or project untouched since then is not
+  // swept, because a job queues after activity.
+  activeSince: number;
+  // Bounds the sweep's own HTTP calls under the caller's concurrency gate.
+  // Absent runs unbounded, which only the fakes and tests do.
+  limit?: <T>(task: () => Promise<T>) => Promise<T>;
+}
+
 export interface ForgeRunner {
   id: string;
   name: string;
@@ -55,6 +76,12 @@ export interface ForgeClient {
   createRegistration(request: RegistrationRequest): Promise<RunnerRegistration>;
   listRunners(scope: Scope): Promise<ForgeRunner[]>;
   deleteRunner(scope: Scope, id: string): Promise<void>;
+  // Absent on a client that cannot enumerate what to sweep. The reader turns
+  // that into a note, never a failure.
+  listQueuedJobs?(
+    scope: Scope,
+    options: QueueSweepOptions,
+  ): Promise<QueuedJob[]>;
 }
 
 export interface ForgeErrorDetails {

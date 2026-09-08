@@ -28,6 +28,8 @@ function report(overrides: Partial<StatusReport> = {}): StatusReport {
     sharedRunners: [],
     suspects: [],
     storage: [],
+    queueRows: [],
+    queueNotes: [],
     unreachableHosts: [],
     unreachableForges: [],
     ok: true,
@@ -106,6 +108,8 @@ describe('renderStatusReport, managers', () => {
     configPath: '/tmp/grove.yaml',
     suspects: [],
     storage: [],
+    queueRows: [],
+    queueNotes: [],
     unreachableHosts: [],
     unreachableForges: [],
     ok: true,
@@ -208,6 +212,8 @@ describe('renderStatusReport, the stack column', () => {
         sharedRunners: [],
         suspects: [],
         storage: [],
+        queueRows: [],
+        queueNotes: [],
         unreachableHosts: [],
         unreachableForges: [],
         ok: true,
@@ -410,5 +416,65 @@ describe('the job column', () => {
     expect(text).toContain('unknown');
     // No timestamp in the log line means a name and no elapsed time.
     expect(text).toContain('test');
+  });
+});
+
+describe('the Queue section', () => {
+  it('draws a Queue section with the wait of the oldest job', () => {
+    const text = renderStatusReport(
+      report({
+        queueRows: [
+          { group: 'overload-macos', waiting: 1, oldest: 1000 },
+          { group: 'overload-arm64', waiting: 0 },
+        ],
+        queueNotes: [],
+      }),
+      { color: false, now: 233_000 },
+    );
+    expect(text).toContain('Queue');
+    expect(text).toMatch(/overload-macos\s+1\s+3m/);
+    expect(text).toMatch(/overload-arm64\s+0\s+-/);
+  });
+
+  it('leaves the Queue section out when nothing swept', () => {
+    const text = renderStatusReport(report({ queueRows: [], queueNotes: [] }), {
+      color: false,
+    });
+    expect(text).not.toContain('Queue');
+  });
+
+  it('prints a note from a forge that could not be swept', () => {
+    const text = renderStatusReport(
+      report({
+        queueRows: [{ group: 'g', waiting: 0 }],
+        queueNotes: ['forge gl: 403'],
+      }),
+      { color: false },
+    );
+    expect(text).toContain('forge gl: 403');
+  });
+
+  it('renders a dash rather than a zero for a group whose forge is unknown', () => {
+    const text = renderStatusReport(
+      report({
+        queueRows: [{ group: 'overload-macos', waiting: undefined }],
+        queueNotes: [],
+      }),
+      { color: false },
+    );
+    expect(text).toMatch(/overload-macos\s+-\s+-/);
+    expect(text).not.toContain('overload-macos  0');
+  });
+
+  it('keeps the note under the Queue heading even with no rows', () => {
+    const text = renderStatusReport(
+      report({
+        queueRows: [],
+        queueNotes: ['forge gl: cannot report a queue'],
+      }),
+      { color: false },
+    );
+    expect(text).toContain('Queue');
+    expect(text).toContain('forge gl: cannot report a queue');
   });
 });

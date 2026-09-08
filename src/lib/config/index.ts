@@ -35,6 +35,7 @@ export { validateReferences } from './references.js';
 export {
   DEFAULT_HISTORY_RETENTION_MS,
   DEFAULT_METRICS_SCRAPE_CACHE_MS,
+  DEFAULT_QUEUE_ACTIVE_WITHIN_MS,
   DEFAULT_TICK,
   type ForgeAuth,
   type ForgeConfig,
@@ -52,6 +53,7 @@ export {
   type MetricsConfig,
   metricsSchema,
   type Placement,
+  type QueueConfig,
   type Scope,
   type StackKind,
   type TickConfig,

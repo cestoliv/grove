@@ -3,12 +3,18 @@ import type {
   ForgeClient,
   ForgeRunner,
   ForgeRunnerManager,
+  QueuedJob,
+  QueueSweepOptions,
   RegistrationRequest,
   RunnerRegistration,
 } from './types.js';
 import { ForgeError } from './types.js';
 
-type FakeMethod = 'createRegistration' | 'listRunners' | 'deleteRunner';
+type FakeMethod =
+  | 'createRegistration'
+  | 'listRunners'
+  | 'deleteRunner'
+  | 'listQueuedJobs';
 
 export interface DeletedRunner {
   scope: Scope;
@@ -35,6 +41,10 @@ export class FakeForgeClient implements ForgeClient {
   readonly scopesListed: Scope[] = [];
 
   private runners: ForgeRunner[] = [];
+  private queuedJobs: QueuedJob[] = [];
+  // Overrides `queuedJobs` for one scope, so a test can prove a sweep asked
+  // more than one scope rather than reading the same list twice.
+  private queuedJobsByScope = new Map<string, QueuedJob[]>();
   private readonly failures = new Map<FakeMethod, string>();
   private minted = 0;
 
@@ -46,6 +56,16 @@ export class FakeForgeClient implements ForgeClient {
 
   setRunners(runners: ForgeRunner[]): this {
     this.runners = [...runners];
+    return this;
+  }
+
+  setQueuedJobs(jobs: QueuedJob[]): this {
+    this.queuedJobs = [...jobs];
+    return this;
+  }
+
+  setQueuedJobsForScope(scope: Scope, jobs: QueuedJob[]): this {
+    this.queuedJobsByScope.set(scopeLabel(scope), [...jobs]);
     return this;
   }
 
@@ -147,5 +167,15 @@ export class FakeForgeClient implements ForgeClient {
     this.guard('deleteRunner');
     this.runners = this.runners.filter((runner) => runner.id !== id);
     this.deleted.push({ scope, id });
+  }
+
+  async listQueuedJobs(
+    scope: Scope,
+    _options: QueueSweepOptions,
+  ): Promise<QueuedJob[]> {
+    this.guard('listQueuedJobs');
+    const jobs =
+      this.queuedJobsByScope.get(scopeLabel(scope)) ?? this.queuedJobs;
+    return jobs.map((job) => ({ ...job }));
   }
 }

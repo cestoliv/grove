@@ -99,9 +99,27 @@ export function buildProgram(): Command {
     .command('status')
     .description('Table of groups, hosts, runners and state. Takes --json.')
     .option('--json', 'Print the report as JSON')
+    .option('--no-queue', 'Skip the queue sweep for a faster status')
+    .action(
+      async (
+        options: { json?: boolean; queue?: boolean },
+        command: Command,
+      ) => {
+        const { runStatus } = await import('./commands/status.js');
+        process.exitCode = await runStatus({
+          config: command.optsWithGlobals().config,
+          ...options,
+        });
+      },
+    );
+
+  program
+    .command('queue')
+    .description('List the jobs waiting for a runner. Takes --json.')
+    .option('--json', 'Print the queue as JSON')
     .action(async (options: { json?: boolean }, command: Command) => {
-      const { runStatus } = await import('./commands/status.js');
-      process.exitCode = await runStatus({
+      const { runQueue } = await import('./commands/queue.js');
+      process.exitCode = await runQueue({
         config: command.optsWithGlobals().config,
         ...options,
       });

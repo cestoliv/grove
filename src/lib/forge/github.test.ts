@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Scope } from '../config/index.js';
-import { GithubClient, MAX_RUNNER_PAGES } from './github.js';
+import { type FetchFn, GithubClient, MAX_RUNNER_PAGES } from './github.js';
 
 const TOKEN = ['ghp', '0123456789abcdefghij'].join('_');
 const ORG: Scope = { level: 'organization', target: 'Overload-coach' };
@@ -263,5 +263,144 @@ describe('GithubClient error reporting', () => {
     await expect(client(fetchFn).listRunners(ORG)).rejects.toThrow(
       /ENOTFOUND api.github.com/,
     );
+  });
+});
+
+describe('listQueuedJobs', () => {
+  const now = Date.parse('2026-09-08T10:00:00Z');
+  const fresh = new Date(now - 3_600_000).toISOString();
+  const stale = new Date(now - 30 * 86_400_000).toISOString();
+
+  it('sweeps repositories pushed inside the window and skips the rest', async () => {
+    const calls: string[] = [];
+    const fetchFn = (async (url: string) => {
+      calls.push(new URL(url).pathname + new URL(url).search);
+      if (url.includes('/orgs/acme/repos')) {
+        return json([
+          { full_name: 'acme/api', pushed_at: fresh },
+          { full_name: 'acme/attic', pushed_at: stale },
+        ]);
+      }
+      if (url.includes('/actions/runs?status=queued')) {
+        return json({ workflow_runs: [{ id: 7, created_at: fresh }] });
+      }
+      return json({
+        jobs: [
+          {
+            name: 'build',
+            status: 'queued',
+            labels: ['self-hosted', 'arm64'],
+            started_at: null,
+            html_url: 'https://github.com/acme/api/runs/9',
+          },
+          { name: 'lint', status: 'completed', labels: [], html_url: 'x' },
+        ],
+      });
+    }) as unknown as FetchFn;
+
+    const client = new GithubClient({ name: 'gh', token: 't', fetchFn });
+    const jobs = await client.listQueuedJobs(
+      { level: 'organization', target: 'acme' },
+      { activeSince: now - 7 * 86_400_000 },
+    );
+
+    expect(jobs).toEqual([
+      {
+        project: 'acme/api',
+        name: 'build',
+        labels: ['self-hosted', 'arm64'],
+        queuedAt: Date.parse(fresh),
+        url: 'https://github.com/acme/api/runs/9',
+      },
+    ]);
+    expect(calls.some((path) => path.includes('acme/attic'))).toBe(false);
+  });
+
+  it('sweeps only its own repository at repository scope', async () => {
+    const calls: string[] = [];
+    const fetchFn = (async (url: string) => {
+      calls.push(url);
+      if (url.includes('/actions/runs?status=queued')) {
+        return json({ workflow_runs: [] });
+      }
+      return json({});
+    }) as unknown as FetchFn;
+    const client = new GithubClient({ name: 'gh', token: 't', fetchFn });
+    await client.listQueuedJobs(
+      { level: 'repository', target: 'acme/api' },
+      { activeSince: 0 },
+    );
+    expect(calls.some((url) => url.includes('/orgs/'))).toBe(false);
+  });
+
+  it('keeps the other repositories when one rejects, mirroring GitLab', async () => {
+    const fetchFn = (async (url: string) => {
+      if (url.includes('/orgs/acme/repos')) {
+        return json([
+          { full_name: 'acme/good', pushed_at: fresh },
+          { full_name: 'acme/locked', pushed_at: fresh },
+        ]);
+      }
+      if (url.includes('acme/locked/actions/runs')) {
+        return new Response(JSON.stringify({ message: 'Forbidden' }), {
+          status: 403,
+        });
+      }
+      if (url.includes('acme/good/actions/runs?status=queued')) {
+        return json({ workflow_runs: [{ id: 1, created_at: fresh }] });
+      }
+      return json({
+        jobs: [
+          {
+            name: 'build',
+            status: 'queued',
+            labels: [],
+            started_at: null,
+            html_url: 'https://github.com/acme/good/runs/1',
+          },
+        ],
+      });
+    }) as unknown as FetchFn;
+
+    const client = new GithubClient({ name: 'gh', token: 't', fetchFn });
+    const jobs = await client.listQueuedJobs(
+      { level: 'organization', target: 'acme' },
+      { activeSince: now - 7 * 86_400_000 },
+    );
+
+    expect(jobs.map((job) => job.project)).toEqual(['acme/good']);
+  });
+
+  it('never renders NaN when a run and its jobs carry no timestamp', async () => {
+    const fetchFn = (async (url: string) => {
+      if (url.includes('/actions/runs?status=queued')) {
+        return json({ workflow_runs: [{ id: 1 }] });
+      }
+      return json({
+        jobs: [{ name: 'build', status: 'queued', labels: [], html_url: 'u' }],
+      });
+    }) as unknown as FetchFn;
+
+    const client = new GithubClient({ name: 'gh', token: 't', fetchFn });
+    const jobs = await client.listQueuedJobs(
+      { level: 'repository', target: 'acme/api' },
+      { activeSince: 0 },
+    );
+
+    expect(jobs[0].queuedAt).toBe(0);
+  });
+
+  it('refuses at enterprise scope, because GitHub lists no repositories there', async () => {
+    const client = new GithubClient({
+      name: 'gh',
+      token: 't',
+      fetchFn: (async () => json({})) as unknown as FetchFn,
+    });
+    await expect(
+      client.listQueuedJobs(
+        { level: 'enterprise', target: 'acme' },
+        { activeSince: 0 },
+      ),
+    ).rejects.toThrow(/enterprise scope/);
   });
 });

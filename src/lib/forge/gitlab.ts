@@ -14,6 +14,8 @@ import {
   ForgeError,
   type ForgeRunner,
   type ForgeRunnerManager,
+  type QueuedJob,
+  type QueueSweepOptions,
   type RegistrationRequest,
   type RunnerRegistration,
 } from './types.js';
@@ -57,6 +59,19 @@ interface RawManager {
   contacted_at?: unknown;
   version?: unknown;
   ip_address?: unknown;
+}
+
+interface RawProject {
+  id: number | string;
+  path_with_namespace?: string;
+}
+
+interface RawJob {
+  name?: string;
+  status?: string;
+  tag_list?: string[];
+  created_at?: string;
+  web_url?: string;
 }
 
 function messageFromBody(data: unknown, text: string): string {
@@ -233,6 +248,93 @@ export class GitlabClient implements ForgeClient {
       }
       throw error;
     }
+  }
+
+  async listQueuedJobs(
+    scope: Scope,
+    options: QueueSweepOptions,
+  ): Promise<QueuedJob[]> {
+    const limit = options.limit ?? (<T>(task: () => Promise<T>) => task());
+    const projects = await this.sweepTargets(scope, options.activeSince, limit);
+    const found = await Promise.all(
+      projects.map((project) => this.pendingJobsIn(project, scope, limit)),
+    );
+    return found.flat();
+  }
+
+  private async sweepTargets(
+    scope: Scope,
+    activeSince: number,
+    limit: <T>(task: () => Promise<T>) => Promise<T>,
+  ): Promise<Array<{ id: string; path: string }>> {
+    if (scope.level === 'project') {
+      const id = await limit(() => this.namespaceId(scope));
+      return [{ id: String(id), path: scope.target }];
+    }
+    const since = encodeURIComponent(new Date(activeSince).toISOString());
+    const base =
+      scope.level === 'instance'
+        ? `/projects?last_activity_after=${since}&simple=true`
+        : `/groups/${await limit(() => this.namespaceId(scope))}/projects?include_subgroups=true&last_activity_after=${since}&simple=true`;
+
+    const projects: Array<{ id: string; path: string }> = [];
+    for (let page = 1; page <= GITLAB_MAX_PAGES; page += 1) {
+      const { data, headers } = await limit(() =>
+        this.send(
+          'GET',
+          `${base}&per_page=${this.perPage}&page=${page}`,
+          scope,
+        ),
+      );
+      for (const project of (Array.isArray(data) ? data : []) as RawProject[]) {
+        if (project.path_with_namespace === undefined) {
+          continue;
+        }
+        projects.push({
+          id: String(project.id),
+          path: project.path_with_namespace,
+        });
+      }
+      const next = headers.get('x-next-page');
+      if (next === null || next.trim() === '') {
+        break;
+      }
+    }
+    return projects;
+  }
+
+  // A project with CI disabled, or one outside the token's reach, answers
+  // 403. That is one project grove cannot see, never a failed sweep.
+  private async pendingJobsIn(
+    project: { id: string; path: string },
+    scope: Scope,
+    limit: <T>(task: () => Promise<T>) => Promise<T>,
+  ): Promise<QueuedJob[]> {
+    let data: unknown;
+    try {
+      ({ data } = await limit(() =>
+        this.send(
+          'GET',
+          `/projects/${project.id}/jobs?scope[]=pending&per_page=${this.perPage}`,
+          scope,
+        ),
+      ));
+    } catch (error) {
+      if (
+        error instanceof ForgeError &&
+        (error.status === 403 || error.status === 404)
+      ) {
+        return [];
+      }
+      throw error;
+    }
+    return ((Array.isArray(data) ? data : []) as RawJob[]).map((job) => ({
+      project: project.path,
+      name: job.name ?? '',
+      labels: job.tag_list ?? [],
+      queuedAt: Date.parse(job.created_at ?? '') || 0,
+      url: job.web_url ?? '',
+    }));
   }
 
   private async tagsFor(id: string, scope: Scope): Promise<string[]> {
