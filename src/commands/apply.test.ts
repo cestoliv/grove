@@ -437,7 +437,7 @@ groups:
   function nativeMac(): FakeTransport {
     return new FakeTransport('mac')
       .on('uname', { stdout: 'Darwin arm64\n' })
-      .on('sh -c printf', { stdout: '/Users/olivier' })
+      .on('sh -c printf', { stdout: '/Users/olivier\n501\n' })
       .on('id -u', { stdout: '501\n' })
       .on('docker ps', { stdout: '' })
       .on('launchctl list', { stdout: 'PID\tStatus\tLabel\n' });
@@ -509,7 +509,7 @@ function macDoctorReady(seed = new FakeTransport('mac')): FakeTransport {
   return seed
     .on('uname', { stdout: 'Darwin arm64\n' })
     .on('sh -c printf %s ok', { stdout: 'ok' })
-    .on('sh -c printf', { stdout: '/Users/olivier' })
+    .on('sh -c printf', { stdout: '/Users/olivier\n501\n' })
     .on('id -u', { stdout: '501\n' })
     .on('date +%s', { stdout: String(Math.floor(Date.now() / 1000)) })
     .on('docker ps', { stdout: '' })

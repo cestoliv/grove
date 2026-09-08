@@ -9,7 +9,6 @@ import {
   DockerStack,
   NativeStack,
   type NativeUnit,
-  readUid,
   type SystemIdTarget,
   type VolumeCheck,
 } from '../stack/index.js';
@@ -23,6 +22,12 @@ import type {
 
 export const HOME_COMMAND = 'printf %s "$HOME"';
 
+// The home and the uid in one round trip, because over SSH the round trip
+// costs far more than either command. `|| true` keeps the exit code that of
+// the shell rather than that of `id`, so a host without `id` still reports a
+// home. Line one is the home, line two is the uid.
+export const HOST_FACTS_COMMAND = `${HOME_COMMAND}; printf '\\n'; id -u 2>/dev/null || true`;
+
 export interface ObserveOptions {
   transports: ReadonlyMap<string, Transport>;
   forgeClients: ReadonlyMap<string, ForgeClient>;
@@ -35,6 +40,11 @@ export interface ObserveOptions {
   // half of the pass stays whole, because the absent-disk guard runs before
   // every start and a start is the only thing a fast tick does.
   skipForges?: boolean;
+  // Called as each host and each forge lands, so a caller that renders
+  // progressively does not wait for the slowest one. The returned state still
+  // holds everything, so a caller that ignores these sees no difference.
+  onHost?: (observation: HostObservation) => void;
+  onForge?: (observation: ForgeObservation) => void;
 }
 
 function unreachable(host: string, reason: string): HostObservation {
@@ -85,54 +95,66 @@ async function observeHost(
   // sit outside it, because a host that runs one stack and not the other is
   // a normal host rather than a broken one.
   try {
-    const homeResult = await transport.exec('sh', ['-c', HOME_COMMAND]);
+    const factsResult = await transport.exec('sh', ['-c', HOST_FACTS_COMMAND]);
+    const [homeAnswer = '', uidAnswer = ''] = factsResult.stdout.split('\n');
     // Everything grove derives from the home is an absolute path a supervisor
     // reads, and no transport expands a tilde or a relative path. A host that
     // answers with anything else has no home grove can use.
-    const homeAnswer = homeResult.stdout.trim();
-    const home =
-      homeResult.code === 0 && homeAnswer.startsWith('/')
-        ? homeAnswer
-        : undefined;
-    const uid = await readUid(transport);
+    const home = homeAnswer.trim().startsWith('/')
+      ? homeAnswer.trim()
+      : undefined;
+    // The uid is a convenience, and a host that cannot answer is caught by
+    // the probe that ran before this.
+    const uid = /^\d+$/.test(uidAnswer.trim()) ? uidAnswer.trim() : undefined;
 
     const stack = new DockerStack({ transport, host: name });
-    let containers: DockerContainer[] = [];
-    let containersError: string | undefined;
-    try {
-      containers = await stack.listContainers();
-    } catch (error) {
-      containersError = errorMessage(error);
-    }
-
     const native = new NativeStack({
       transport,
       host: name,
       platform: probe.platform ?? 'Linux',
       ...(uid === undefined ? {} : { uid }),
     });
-    let natives: NativeUnit[] | undefined;
-    let nativesError: string | undefined;
-    try {
-      natives = await native.listUnits();
-    } catch (error) {
-      nativesError = errorMessage(error);
-    }
 
-    const workRoots: Record<string, VolumeCheck> = {};
-    for (const group of groups) {
-      const dirs = buildRunnerDirs({
-        group,
-        host: config.hosts[name],
-        index: 1,
-        home,
-      });
-      workRoots[group.name] = await checkWorkRootVolume(
-        transport,
-        probe.platform ?? 'Linux',
-        dirs.workDir,
-      );
-    }
+    // Nothing here reads anything the others write, so the host answers all
+    // of them in one round trip's worth of wall clock rather than one each.
+    const [containerRead, nativeRead, workRootReads] = await Promise.all([
+      stack.listContainers().then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error: errorMessage(error) }),
+      ),
+      native.listUnits().then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error: errorMessage(error) }),
+      ),
+      Promise.all(
+        groups.map(async (group) => {
+          const dirs = buildRunnerDirs({
+            group,
+            host: config.hosts[name],
+            index: 1,
+            home,
+          });
+          return [
+            group.name,
+            await checkWorkRootVolume(
+              transport,
+              probe.platform ?? 'Linux',
+              dirs.workDir,
+            ),
+          ] as const;
+        }),
+      ),
+    ]);
+
+    const containers: DockerContainer[] =
+      'value' in containerRead ? containerRead.value : [];
+    const containersError =
+      'error' in containerRead ? containerRead.error : undefined;
+    const natives: NativeUnit[] | undefined =
+      'value' in nativeRead ? nativeRead.value : undefined;
+    const nativesError = 'error' in nativeRead ? nativeRead.error : undefined;
+    const workRoots: Record<string, VolumeCheck> =
+      Object.fromEntries(workRootReads);
 
     // gitlab-runner writes .runner_system_id next to config.toml at first
     // start, and the managers endpoint has no field that names a container,
@@ -188,8 +210,17 @@ async function observeForge(
   const runners: ObservedForgeRunner[] = [];
   const seen = new Set<string>();
   try {
-    for (const scope of scopes) {
-      for (const runner of await forgeLimit(() => client.listRunners(scope))) {
+    // forgeLimit is what caps how hard grove hits a forge, so asking for
+    // every scope at once queues them there rather than serialising them
+    // here. The dedup still walks the scopes in config order.
+    const listed = await Promise.all(
+      scopes.map(
+        async (scope) =>
+          [scope, await forgeLimit(() => client.listRunners(scope))] as const,
+      ),
+    );
+    for (const [scope, found] of listed) {
+      for (const runner of found) {
         if (seen.has(runner.id)) {
           continue;
         }
@@ -241,19 +272,24 @@ export async function observeFleet(
   }
 
   const hostNames = Object.keys(config.hosts);
-  const hosts = await Promise.all(
-    hostNames.map((name) => {
+  // Kept unawaited until the forge pass is in flight too. Which forges to ask
+  // comes from the config alone, so an SSH round trip never has to finish
+  // before an HTTP one can start.
+  const hosts = Promise.all(
+    hostNames.map(async (name) => {
       const transport = options.transports.get(name);
-      if (transport === undefined) {
-        return Promise.resolve(unreachable(name, 'no transport was opened'));
-      }
-      return observeHost(
-        name,
-        config,
-        transport,
-        groupsByHost.get(name) ?? [],
-        options.probeTimeoutMs,
-      );
+      const observation =
+        transport === undefined
+          ? unreachable(name, 'no transport was opened')
+          : await observeHost(
+              name,
+              config,
+              transport,
+              groupsByHost.get(name) ?? [],
+              options.probeTimeoutMs,
+            );
+      options.onHost?.(observation);
+      return observation;
     }),
   );
 
@@ -261,18 +297,20 @@ export async function observeFleet(
   // this pass", which already blocks every create and every removal. That is
   // exactly the fast tick's contract.
   const forgeNames = skipForges ? [] : [...scopesByForge.keys()];
-  const forges = await Promise.all(
-    forgeNames.map((name) =>
-      observeForge(
+  const forges = Promise.all(
+    forgeNames.map(async (name) => {
+      const observation = await observeForge(
         name,
         // skipForges is false here, and manageableGroups required the client
         // to be present for every group that fed scopesByForge in that case.
         options.forgeClients.get(name) as ForgeClient,
         scopesByForge.get(name) ?? [],
         forgeLimit,
-      ),
-    ),
+      );
+      options.onForge?.(observation);
+      return observation;
+    }),
   );
 
-  return { hosts, forges };
+  return { hosts: await hosts, forges: await forges };
 }

@@ -110,7 +110,10 @@ export async function readHostStorage(
 ): Promise<HostStorage> {
   const storage: HostStorage = { host, workDirs: [] };
 
-  if (options.docker !== false) {
+  // Two reads that share nothing. `du -sk` over a busy work root is the slow
+  // one, so overlapping it with `docker system df` costs the host nothing and
+  // saves a round trip.
+  const readDocker = async (): Promise<void> => {
     try {
       const result = await transport.exec('docker', DOCKER_DF_ARGS);
       const usage =
@@ -126,9 +129,9 @@ export async function readHostStorage(
     } catch (error) {
       storage.dockerError = errorMessage(error);
     }
-  }
+  };
 
-  if (targets.length > 0) {
+  const readWorkDirs = async (): Promise<void> => {
     try {
       const measured = await transport.exec('sh', [
         '-c',
@@ -154,9 +157,15 @@ export async function readHostStorage(
     } catch (error) {
       storage.workDirError = errorMessage(error);
     }
-  } else {
+  };
+
+  if (targets.length === 0) {
     storage.workDirBytes = 0;
   }
+  await Promise.all([
+    options.docker === false ? undefined : readDocker(),
+    targets.length === 0 ? undefined : readWorkDirs(),
+  ]);
 
   return storage;
 }
