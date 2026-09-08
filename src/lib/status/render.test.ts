@@ -366,3 +366,49 @@ describe('renderStatusReport while data is still arriving', () => {
     expect(text).toContain('Every host and forge answered.');
   });
 });
+
+describe('the job column', () => {
+  const NOW = Date.parse('2026-09-08T11:14:03Z');
+
+  it('stays out of the table while no seat is running a job', () => {
+    const text = renderStatusReport(report(), { color: false, now: NOW });
+    expect(text).not.toContain('JOB');
+  });
+
+  it('names the job and how long it has been running', () => {
+    const text = renderStatusReport(
+      report({
+        rows: [
+          row({
+            forgeStatus: 'busy',
+            job: {
+              label: 'build (macos)',
+              startedAt: Date.parse('2026-09-08T11:02:03Z'),
+            },
+          }),
+        ],
+      }),
+      { color: false, now: NOW },
+    );
+    expect(text).toContain('JOB');
+    expect(text).toContain('build (macos) 12m');
+  });
+
+  it('marks a busy seat whose log said nothing', () => {
+    const text = renderStatusReport(
+      report({
+        rows: [
+          row({ forgeStatus: 'busy' }),
+          row({
+            runner: 'grove-overload-arm-2',
+            job: { label: 'test' },
+          }),
+        ],
+      }),
+      { color: false, now: NOW },
+    );
+    expect(text).toContain('unknown');
+    // No timestamp in the log line means a name and no elapsed time.
+    expect(text).toContain('test');
+  });
+});

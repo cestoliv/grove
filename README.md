@@ -305,18 +305,20 @@ grove logs grove-overload-arm-1 --follow --tail 500
 config  /work/grove.yaml
 
 Runners
-  GROUP         HOST  RUNNER                STACK   PROCESS  DETAIL                    FORGE    OWNER
-  overload-arm  mac   grove-overload-arm-1  docker  running  Up 3 hours                busy     managed
-  overload-arm  mac   grove-overload-arm-2  docker  exited   Exited (0) 4 minutes ago  offline  managed
-  ios           mac   grove-ios-1           native  running  pid 4242                  online   managed
-  legacy        mac   grove-legacy-1        docker  running  Up 2 days                 online   unmanaged
+  GROUP         HOST  RUNNER                STACK   PROCESS  DETAIL                    FORGE    JOB                OWNER
+  overload-arm  mac   grove-overload-arm-1  docker  running  Up 3 hours                busy     build (macos) 12m  managed
+  overload-arm  mac   grove-overload-arm-2  docker  exited   Exited (0) 4 minutes ago  offline  -                  managed
+  ios           mac   grove-ios-1           native  running  pid 4242                  online   -                  managed
+  legacy        mac   grove-legacy-1        docker  running  Up 2 days                 online   -                  unmanaged
 
 Every host and forge answered.
 ```
 
 In a terminal, `grove status` draws that report as it fills. The `Daemon` and `Suspect runners` blocks come from the local database, so they are on screen before the first host is asked anything, and each host, forge and storage read lands in place under a spinner naming what is still outstanding. The report is redrawn, never appended, so the terminal holds one copy of it. A pipe, `--json` and a report taller than the window all take a single final print instead.
 
-The `FORGE` column carries the forge's opinion of the runner, which is `online`, `offline`, `busy` or `unknown`. There is no column for the job a busy runner is running, because the GitHub API does not expose it. `--json` prints the same report with the forge name the table leaves out.
+The `FORGE` column carries the forge's opinion of the runner, which is `online`, `offline`, `busy` or `unknown`. `--json` prints the same report with the forge name the table leaves out.
+
+The `JOB` column names the job a busy runner is running, and how long it has been running it. Neither forge exposes that on its runner listing, so grove reads the seat's own runner log instead: one command per busy seat, and none at all for an idle fleet. A container is read with `docker logs --since 24h` piped through a `grep` on the host, because gitlab-runner appends the job trace every few seconds and a plain tail loses the line that names the job. A native seat keeps the journal read `grove logs` already uses. The column appears only when a seat is running a job. A busy seat whose log grove could not read, or whose log named no job, reads `unknown`.
 
 A fleet with a GitLab group gets one more column and one more table. `MANAGER` carries the state GitLab reports for the manager process behind a seat, and it appears only when a forge in the fleet reports managers at all. `Shared runners` lists one row per runner entity, with its id, its tags, and how many managers GitLab lists out of how many containers the config asks for.
 
