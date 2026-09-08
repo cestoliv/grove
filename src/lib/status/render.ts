@@ -7,6 +7,11 @@ const FORGE_COLUMN = 6;
 
 export interface StatusRenderOptions {
   color?: boolean;
+  // What has not answered yet. While anything is outstanding the closing
+  // verdict would be a guess, so the line names what grove is still waiting
+  // on instead, marked with the spinner frame of the moment.
+  pending?: string[];
+  spinner?: string;
 }
 
 function stamp(ts: number | undefined): string {
@@ -153,7 +158,11 @@ export function renderStatusReport(
   }
 
   lines.push('');
-  if (report.ok) {
+  const pending = options.pending ?? [];
+  if (pending.length > 0) {
+    const mark = options.spinner === undefined ? '' : `${options.spinner} `;
+    lines.push(c.dim(`${mark}waiting on ${pending.join(', ')}`));
+  } else if (report.ok) {
     lines.push(c.green('Every host and forge answered.'));
   } else {
     const parts = [

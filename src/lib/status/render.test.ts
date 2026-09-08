@@ -349,3 +349,20 @@ describe('renderStatusReport, storage', () => {
     expect(text).not.toContain('Storage');
   });
 });
+
+describe('renderStatusReport while data is still arriving', () => {
+  it('names what has not answered instead of a verdict', () => {
+    const text = renderStatusReport(report(), {
+      color: false,
+      pending: ['host atlas', 'storage on mac'],
+      spinner: '⠙',
+    });
+    expect(text).toContain('⠙ waiting on host atlas, storage on mac');
+    expect(text).not.toContain('Every host and forge answered.');
+  });
+
+  it('gives the verdict again once nothing is outstanding', () => {
+    const text = renderStatusReport(report(), { color: false, pending: [] });
+    expect(text).toContain('Every host and forge answered.');
+  });
+});

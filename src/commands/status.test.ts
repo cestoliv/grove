@@ -242,3 +242,51 @@ describe('runStatus, storage', () => {
     expect(parsed.storage[0].workDirBytes).toBe(2048 * 1024);
   });
 });
+
+describe('runStatus in a terminal', () => {
+  it('opens on a waiting frame and closes on the finished report', async () => {
+    const frames: string[] = [];
+    const code = await runStatus(
+      options({
+        live: true,
+        stdout: undefined,
+        liveStdout: (text: string) => frames.push(text),
+        liveColumns: 200,
+        // Nothing should redraw on the spinner's clock during a test.
+        liveIntervalMs: 1_000_000,
+      }),
+    );
+
+    expect(code).toBe(EXIT_OK);
+    expect(frames[0]).toContain('waiting on host mac');
+    expect(frames[0]).not.toContain('Every host and forge answered.');
+
+    const last = frames[frames.length - 1];
+    expect(last).not.toContain('waiting on');
+    expect(last).toContain('grove-overload-arm-1');
+    expect(last).toContain('Every host and forge answered.');
+    // Every frame after the first rewinds over the one before it, so the
+    // terminal holds one report rather than a stack of them.
+    for (const frame of frames.slice(1)) {
+      expect(frame.startsWith('\u001B[')).toBe(true);
+    }
+  });
+
+  it('stays on one final print for --json, terminal or not', async () => {
+    const frames: string[] = [];
+    const out: string[] = [];
+    await runStatus(
+      options({
+        json: true,
+        live: true,
+        stdout: (text: string) => out.push(text),
+        liveStdout: (text: string) => frames.push(text),
+      }),
+    );
+
+    expect(frames).toEqual([]);
+    expect(JSON.parse(out.join('\n')).rows[0].runner).toBe(
+      'grove-overload-arm-1',
+    );
+  });
+});

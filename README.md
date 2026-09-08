@@ -314,6 +314,8 @@ Runners
 Every host and forge answered.
 ```
 
+In a terminal, `grove status` draws that report as it fills. The `Daemon` and `Suspect runners` blocks come from the local database, so they are on screen before the first host is asked anything, and each host, forge and storage read lands in place under a spinner naming what is still outstanding. The report is redrawn, never appended, so the terminal holds one copy of it. A pipe, `--json` and a report taller than the window all take a single final print instead.
+
 The `FORGE` column carries the forge's opinion of the runner, which is `online`, `offline`, `busy` or `unknown`. There is no column for the job a busy runner is running, because the GitHub API does not expose it. `--json` prints the same report with the forge name the table leaves out.
 
 A fleet with a GitLab group gets one more column and one more table. `MANAGER` carries the state GitLab reports for the manager process behind a seat, and it appears only when a forge in the fleet reports managers at all. `Shared runners` lists one row per runner entity, with its id, its tags, and how many managers GitLab lists out of how many containers the config asks for.

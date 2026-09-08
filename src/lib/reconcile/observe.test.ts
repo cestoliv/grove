@@ -124,7 +124,7 @@ describe('observeFleet', () => {
   it('keeps a host without docker reachable and degrades that stack alone', async () => {
     const mac = new FakeTransport('mac')
       .on('uname', { stdout: 'Linux x86_64\n' })
-      .on('sh -c printf', { stdout: '/home/ci' })
+      .on('sh -c printf', { stdout: '/home/ci\n1000\n' })
       .on('id -u', { stdout: '1000\n' })
       .fail('docker ps', 'docker: command not found\n', 127);
     const observed = await observeFleet(config(), {
@@ -459,7 +459,7 @@ describe('observeFleet, native seats', () => {
   it('reads the uid and lists what launchd loaded', async () => {
     const mac = new FakeTransport('mac')
       .on('uname', { stdout: 'Darwin arm64\n' })
-      .on('sh -c printf', { stdout: '/Users/olivier' })
+      .on('sh -c printf', { stdout: '/Users/olivier\n501\n' })
       .on('id -u', { stdout: '501\n' })
       .on('docker ps', { stdout: '' })
       .on('stat', { stdout: '17\n' })
@@ -488,7 +488,7 @@ describe('observeFleet, native seats', () => {
   it('guards the work root of a native group, as it does a Docker one', async () => {
     const mac = new FakeTransport('mac')
       .on('uname', { stdout: 'Darwin arm64\n' })
-      .on('sh -c printf', { stdout: '/Users/olivier' })
+      .on('sh -c printf', { stdout: '/Users/olivier\n501\n' })
       .on('id -u', { stdout: '501\n' })
       .on('docker ps', { stdout: '' })
       .on('launchctl list', { stdout: 'PID\tStatus\tLabel\n' })
@@ -508,7 +508,7 @@ describe('observeFleet, native seats', () => {
   it('degrades the native stack alone when the user bus is missing', async () => {
     const atlas = new FakeTransport('atlas')
       .on('uname', { stdout: 'Linux x86_64\n' })
-      .on('sh -c printf', { stdout: '/home/ci' })
+      .on('sh -c printf', { stdout: '/home/ci\n1000\n' })
       .on('id -u', { stdout: '1000\n' })
       .on('docker ps', { stdout: '' })
       .fail(
@@ -542,7 +542,7 @@ describe('observeFleet, native seats', () => {
   it('asks the supervisor even on a host with no native group', async () => {
     const mac = new FakeTransport('mac')
       .on('uname', { stdout: 'Darwin arm64\n' })
-      .on('sh -c printf', { stdout: '/Users/olivier' })
+      .on('sh -c printf', { stdout: '/Users/olivier\n501\n' })
       .on('id -u', { stdout: '501\n' })
       .on('docker ps', { stdout: '' })
       .on('launchctl list', {
@@ -604,5 +604,36 @@ describe('observeFleet with skipForges', () => {
     expect(observed.forges).toEqual([]);
     // No client means no manageable group, which is what `grove logs` relies on.
     expect(Object.keys(observed.hosts[0].workRoots)).toEqual([]);
+  });
+});
+
+describe('observeFleet, as each answer lands', () => {
+  it('hands every host and every forge to the caller on arrival', async () => {
+    const hosts: string[] = [];
+    const forges: string[] = [];
+    const observed = await observeFleet(config(), {
+      transports: transports({ mac: healthyMac() }),
+      forgeClients: new Map([
+        ['gh-overload', new FakeForgeClient('gh-overload')],
+      ]),
+      onHost: (host) => hosts.push(host.host),
+      onForge: (forge) => forges.push(forge.forge),
+    });
+
+    expect(hosts).toEqual(['mac']);
+    expect(forges).toEqual(['gh-overload']);
+    expect(observed.hosts.map((host) => host.host)).toEqual(hosts);
+    expect(observed.forges.map((forge) => forge.forge)).toEqual(forges);
+  });
+
+  it('reports a host that has no transport too', async () => {
+    const hosts: string[] = [];
+    await observeFleet(config(), {
+      transports: new Map(),
+      forgeClients: new Map(),
+      onHost: (host) => hosts.push(host.host),
+    });
+
+    expect(hosts).toEqual(['mac']);
   });
 });
