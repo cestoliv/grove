@@ -40,7 +40,7 @@ The file says which runners exist, on which host, against which forge. `grove pl
 
 ## Status
 
-Milestone 6 of six, and the last one. grove manages GitHub and GitLab runners in Docker containers, and GitHub runners as processes on the host under launchd on macOS and systemd on Linux. `config`, `plan`, `apply`, `status`, `logs`, `doctor` and `teardown` work on every one of them. `grove daemon` converges the fleet on its own, detects stuck runners, prunes work directories against `max_work_size` and prunes its own history against `history.retention`. `grove doctor` checks every host, forge and group and prints the fix for each finding, and `metrics.listen` turns on a Prometheus exporter inside the daemon.
+Milestone 6 of six, and the last one. grove manages GitHub and GitLab runners in Docker containers, and GitHub runners as processes on the host under launchd on macOS and systemd on Linux. `config`, `plan`, `apply`, `status`, `logs`, `doctor`, `teardown` and `forget` work on every one of them. `grove daemon` converges the fleet on its own, detects stuck runners, prunes work directories against `max_work_size` and prunes its own history against `history.retention`. `grove doctor` checks every host, forge and group and prints the fix for each finding, and `metrics.listen` turns on a Prometheus exporter inside the daemon.
 
 Switching a group from `docker` to `native`, or back, takes two applies. The first drains the seat on the stack it runs on today, deregisters it and retires its record. The second creates it on the new stack. grove refuses to run one runner name on two supervisors at once, so it waits for the record to go before it makes the new seat.
 
@@ -277,7 +277,7 @@ Exit codes:
 |---|---|
 | 0 | Everything converged, every host and forge answered |
 | 1 | At least one host or forge did not answer, or a runner is degraded |
-| 2 | Config missing or invalid, or a credential could not be resolved |
+| 2 | Config missing or invalid, a credential could not be resolved, or `forget` refused a runner |
 | 3 | A destructive change was not confirmed |
 
 SSH control sockets that grove opens for reuse live under `~/.ssh/grove/`.
@@ -633,7 +633,7 @@ The log names hosts, groups and runner names, and it never prints a token. It do
 
 ### One reconciler at a time
 
-`apply`, `teardown` and the daemon take one lock, `<stateDir>/grove.pid`. Two reconcilers on one fleet would mint two registrations for a seat, or drain a container the other just started.
+`apply`, `teardown`, `forget` and the daemon take one lock, `<stateDir>/grove.pid`. Two reconcilers on one fleet would mint two registrations for a seat, or drain a container the other just started.
 
 A command that finds the lock held names who holds it, by pid and by command, and exits 1.
 
@@ -643,7 +643,7 @@ another grove process holds /…/grove.pid: pid 4242 (daemon) since 2026-08-16T0
 
 `plan`, `status`, `logs`, `config` and every `daemon` subcommand except `run` take nothing, so a fleet the daemon is converging is still readable. There is no `--force`, because a lock an operator can override is a lock that gets overridden at exactly the wrong moment. A stale lock, one whose pid is not alive, is taken over automatically, which is what a reboot leaves behind.
 
-The daemon takes the lock per tick, not for its whole life. It holds the lock while a tick runs and releases it in between, so `grove apply` and `grove teardown` run in the gap between two ticks rather than needing `grove daemon uninstall` first. A tick that finds the lock held is skipped, the daemon says so once in `grove.log`, and the next tick picks up whatever the apply left behind.
+The daemon takes the lock per tick, not for its whole life. It holds the lock while a tick runs and releases it in between, so `grove apply`, `grove teardown` and `grove forget` run in the gap between two ticks rather than needing `grove daemon uninstall` first. A tick that finds the lock held is skipped, the daemon says so once in `grove.log`, and the next tick picks up whatever the apply left behind.
 
 ## Teardown
 
@@ -674,6 +674,30 @@ A runner that exists only at the forge is the one case grove cannot read. Its co
 A record with no container and no forge runner behind it is an orphan. `teardown` reports it and leaves it alone. `apply` retires it, because nothing is left for the record to protect.
 
 Run `teardown` before you delete a group from the config. grove deregisters a runner only when it can still see it in a scope the config names, so a group deleted while its runners still exist leaves the forge records behind, reported as orphans.
+
+### A host that is gone for good
+
+```bash
+grove forget grove-overload-eris-1
+grove forget grove-overload-eris-1 grove-overload-eris-2 --yes
+```
+
+grove never deletes what it cannot see, so a host that never answers again keeps its runners' records active forever. `apply` and `teardown` report them as degraded, and the exporter reports them as `missing`. `forget` is the operator's word in place of that observation. It retires the named records and clears their stuck-detection watch. It contacts no host and no forge.
+
+| Flag | What it does |
+|---|---|
+| `--yes` | Answer yes to the confirmation |
+
+`forget` refuses a runner whose host is still in grove.yaml, reachable or not. That runner belongs to `apply` and `teardown`, which can still reach it the day the host answers again. To forget a runner:
+
+1. Remove its host, and every group placed on that host, from grove.yaml.
+2. Run `grove forget <runner>...`.
+
+`forget` refuses the whole run when one name has no active record or still has its host in the config, so it retires all the names or none. It leaves the forge record alone. When the forge still lists the runner, delete it in the forge's runner settings.
+
+`forget` exits 2 when it refuses a name, 3 when nobody confirms, and 1 when another command holds the lock.
+
+A forgotten seat is unmanaged to grove. If its host comes back with the container or unit still running, grove reports that seat as unmanaged, never adopts it, and leaves it alone. Before you add the host back to grove.yaml, remove the seat by hand on that host: `docker rm -f <runner>` for a Docker seat, or stop the unit and delete its install directory for a native seat. `grove teardown --include-unmanaged` would also reach it, but teardown removes every runner in the fleet.
 
 ## What grove creates
 
@@ -793,7 +817,7 @@ grove keeps its history in one directory. `GROVE_STATE_DIR` overrides it.
 | `grove.db` | The history and ownership database |
 | `grove.log` | The daemon's append-only log, read with `grove daemon tail` |
 | `grove.log.1` | The one previous log, kept across a rollover |
-| `grove.pid` | The lock `apply`, `teardown` and the daemon share |
+| `grove.pid` | The lock `apply`, `teardown`, `forget` and the daemon share |
 | `daemon.out.log` | What the daemon printed before its own logger opened, macOS only |
 | `daemon.err.log` | What a crash printed on the way out, macOS only |
 

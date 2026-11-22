@@ -294,12 +294,31 @@ export class StateStore {
       .run(systemId, id);
   }
 
+  // The watch only compares one tick with the next, and a retired seat has no
+  // next tick, so its row goes with it.
   retireRunner(id: number): void {
-    this.db
-      .prepare(
-        'UPDATE runners SET retired_at = ? WHERE id = ? AND retired_at IS NULL',
-      )
-      .run(this.now(), id);
+    this.retireRunners([id]);
+  }
+
+  // One transaction, so a crash retires every seat or none of them.
+  retireRunners(ids: number[]): void {
+    const retire = this.db.prepare(
+      'UPDATE runners SET retired_at = ? WHERE id = ? AND retired_at IS NULL',
+    );
+    const unwatch = this.db.prepare(
+      'DELETE FROM runner_watch WHERE runner_id = ?',
+    );
+    this.db.exec('BEGIN');
+    try {
+      for (const id of ids) {
+        retire.run(this.now(), id);
+        unwatch.run(id);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   createGroupRegistration(

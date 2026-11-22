@@ -44,8 +44,8 @@ export interface AcquireLockOptions {
 /**
  * The daemon converges the fleet every couple of minutes, and an operator
  * reconciling the same hosts at the same moment would race it. One lock
- * covers `apply`, `teardown` and the daemon. Every read-only command takes
- * nothing, which is why the refusal names them.
+ * covers `apply`, `teardown`, `forget` and the daemon. Every read-only
+ * command takes nothing, which is why the refusal names them.
  */
 export function takeStateLockOrExit(
   options: AcquireLockOptions,

@@ -22,6 +22,7 @@ describe('buildProgram', () => {
       'config',
       'daemon',
       'doctor',
+      'forget',
       'logs',
       'plan',
       'queue',
