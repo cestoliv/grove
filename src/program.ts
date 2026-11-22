@@ -96,6 +96,24 @@ export function buildProgram(): Command {
     );
 
   program
+    .command('forget')
+    .description(
+      'Retire the records of runners whose host has left grove.yaml. Touches no host.',
+    )
+    .argument('<runner...>', 'One or more runner names')
+    .option('-y, --yes', 'Answer yes to the confirmation')
+    .action(
+      async (names: string[], options: { yes?: boolean }, command: Command) => {
+        const { runForget } = await import('./commands/forget.js');
+        process.exitCode = await runForget({
+          config: command.optsWithGlobals().config,
+          names,
+          ...options,
+        });
+      },
+    );
+
+  program
     .command('status')
     .description('Table of groups, hosts, runners and state. Takes --json.')
     .option('--json', 'Print the report as JSON')

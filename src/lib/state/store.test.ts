@@ -87,6 +87,23 @@ describe('StateStore', () => {
     expect(store.getRunner(id)?.retiredAt).toBe(1_002);
   });
 
+  it('drops the watch of every seat it retires', () => {
+    const first = create('grove-overload-arm-1', 1);
+    const second = create('grove-overload-arm-2', 2);
+    for (const id of [first, second]) {
+      store.setWatch(id, {
+        busySince: 1,
+        unregisteredSince: null,
+        suspectSince: null,
+        suspectReason: null,
+      });
+    }
+    store.retireRunners([first, second]);
+    expect(store.activeRunners()).toEqual([]);
+    expect(store.watchFor(first).busySince).toBeNull();
+    expect(store.watchFor(second).busySince).toBeNull();
+  });
+
   it('lists active runners in creation order', () => {
     const first = create('grove-overload-arm-1', 1);
     const second = create('grove-overload-arm-2', 2);
